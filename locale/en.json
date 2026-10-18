@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Task Monitor",
-    "description": "A left-sidebar task board: running sessions are collected automatically (Finished on a normal end, Incomplete on error/interruption). You can also add projects of your own; they start in Queued and are never moved by the sync. Cards can be dragged between lanes."
+    "description": "A left-sidebar task board: running sessions are collected automatically and each card shows cumulative token usage; a normal end moves to Finished, an error/interruption to Incomplete. You can also add projects; they start in Queued and are never moved by the sync."
   }
 }

@@ -53,6 +53,10 @@ window.__ModuleLoader__.load({
       syncHint: 'Running sidebar sessions appear in Running; a normal finish moves the card to Finished, an error or interruption to Incomplete',
       pageHint: 'Running sessions are collected automatically',
       sessionTag: 'Session',
+      projectTag: 'Project',
+      tokensSuffix: 'tokens',
+      tokensHint: 'Total {total} tokens',
+      tokensBreakdown: 'Total {total} tokens · input {input} · output {output} · cache read {read} · cache write {write}',
       runningMeta: 'Running {time}',
       createdMeta: 'Created {time}',
       finishedMeta: 'Finished {time}',
@@ -83,6 +87,10 @@ window.__ModuleLoader__.load({
       syncHint: '侧边栏中正在运行的会话会自动进入「运行中」；正常完成移到「已结束」，出错或被中断移到「未完成」',
       pageHint: '运行中的会话会自动收录',
       sessionTag: '会话',
+      projectTag: '项目',
+      tokensSuffix: 'tokens',
+      tokensHint: '累计 {total} tokens',
+      tokensBreakdown: '累计 {total} tokens · 输入 {input} · 输出 {output} · 缓存读 {read} · 缓存写 {write}',
       runningMeta: '运行中 {time}',
       createdMeta: '创建于 {time}',
       finishedMeta: '完成于 {time}',
@@ -119,6 +127,37 @@ window.__ModuleLoader__.load({
       return hours > 0
         ? hours + ':' + pad2(minutes) + ':' + pad2(seconds)
         : minutes + ':' + pad2(seconds)
+    }
+
+    /** Compact token counts for a card line (1.2k / 3.4M). */
+    function formatTokens(value) {
+      if (!Number.isFinite(value) || value <= 0) return '0'
+      if (value >= 1000000) return (value / 1000000).toFixed(value >= 10000000 ? 0 : 1) + 'M'
+      if (value >= 1000) return (value / 1000).toFixed(value >= 10000 ? 0 : 1) + 'k'
+      return String(Math.round(value))
+    }
+
+    /** Normalize the `tokenUsage` session projection into one totals object. */
+    function sumTokenUsage(usage) {
+      if (usage === null || usage === undefined || typeof usage !== 'object') return undefined
+      const input = Number(usage.uncachedInputTokens) || 0
+      const output = Number(usage.outputTokens) || 0
+      const cacheRead = Number(usage.cacheReadTokens) || 0
+      const cacheWrite = Number(usage.cacheWriteTokens) || 0
+      return {
+        total: input + output + cacheRead + cacheWrite,
+        input: input,
+        output: output,
+        cacheRead: cacheRead,
+        cacheWrite: cacheWrite,
+      }
+    }
+
+    function sameTokenUsage(a, b) {
+      if (a === b) return true
+      if (a === null || a === undefined || b === null || b === undefined) return false
+      return a.total === b.total && a.input === b.input && a.output === b.output
+        && a.cacheRead === b.cacheRead && a.cacheWrite === b.cacheWrite
     }
 
     function uid() {
@@ -216,6 +255,16 @@ window.__ModuleLoader__.load({
                 sessionId: typeof task.sessionId === 'string' ? task.sessionId : undefined,
                 source: task.source === 'session' ? 'session' : undefined,
                 auto: task.auto !== false,
+                tokens: typeof task.tokens === 'number' ? task.tokens : undefined,
+                tokenUsage: task.tokenUsage !== null && typeof task.tokenUsage === 'object'
+                  ? {
+                      total: Number(task.tokenUsage.total) || 0,
+                      input: Number(task.tokenUsage.input) || 0,
+                      output: Number(task.tokenUsage.output) || 0,
+                      cacheRead: Number(task.tokenUsage.cacheRead) || 0,
+                      cacheWrite: Number(task.tokenUsage.cacheWrite) || 0,
+                    }
+                  : undefined,
               }
             })
           : []
@@ -427,6 +476,8 @@ window.__ModuleLoader__.load({
               source: 'session',
               sessionId: row.id,
               auto: true,
+              tokens: row.tokens,
+              tokenUsage: row.tokenUsage,
             })
             changed = true
             return
@@ -437,6 +488,8 @@ window.__ModuleLoader__.load({
             updated = { ...updated, status: 'running', startedAt: Date.now(), finishedAt: undefined, durationMs: undefined }
           }
           if (updated.title !== row.title) updated = { ...updated, title: row.title }
+          if (updated.tokens !== row.tokens) updated = { ...updated, tokens: row.tokens }
+          if (!sameTokenUsage(updated.tokenUsage, row.tokenUsage)) updated = { ...updated, tokenUsage: row.tokenUsage }
           if (updated !== card) {
             next[index] = updated
             changed = true
@@ -445,8 +498,12 @@ window.__ModuleLoader__.load({
         }
         if (index === -1) return
         const card = next[index]
-        if (card.title !== row.title) {
-          next[index] = { ...card, title: row.title }
+        let updated = card
+        if (updated.title !== row.title) updated = { ...updated, title: row.title }
+        if (updated.tokens !== row.tokens) updated = { ...updated, tokens: row.tokens }
+        if (!sameTokenUsage(updated.tokenUsage, row.tokenUsage)) updated = { ...updated, tokenUsage: row.tokenUsage }
+        if (updated !== card) {
+          next[index] = updated
           changed = true
         }
       })
@@ -519,6 +576,7 @@ window.__ModuleLoader__.load({
           ? sessionsState.ids
           : []
         const ids = listed.length > 0 ? listed : Object.keys(byId)
+        const projections = (sessionsState !== null && sessionsState !== undefined && sessionsState.projectionsBySession) || {}
         const rows = []
         ids.forEach(function (id) {
           if (typeof id !== 'string' || id === '') return
@@ -526,10 +584,16 @@ window.__ModuleLoader__.load({
           const status = statusState !== null && statusState !== undefined && typeof statusState.get === 'function'
             ? statusState.get(id)
             : undefined
+          const projection = projections[id]
+          const tokenUsage = projection !== null && projection !== undefined && projection.values
+            ? sumTokenUsage(projection.values.tokenUsage)
+            : undefined
           rows.push({
             id: id,
             title: String(view.displayTitle || view.title || view.name || id),
             running: !!(view.running || (status !== null && status !== undefined && status.running)),
+            tokens: tokenUsage === undefined ? undefined : tokenUsage.total,
+            tokenUsage: tokenUsage,
           })
         })
         return rows
@@ -537,7 +601,7 @@ window.__ModuleLoader__.load({
 
       const sessionSignature = useMemo(function () {
         return sessionRows.map(function (row) {
-          return row.id + (row.running ? '+' : '-') + ':' + row.title
+          return row.id + (row.running ? '+' : '-') + ':' + row.title + ':' + (row.tokens === undefined ? '' : row.tokens)
         }).join('|')
       }, [sessionRows])
 
@@ -930,6 +994,18 @@ window.__ModuleLoader__.load({
         return tr('createdMeta', { time: clockTime(task.createdAt) })
       }
 
+      function tokenTitle(task) {
+        const usage = task.tokenUsage
+        if (usage === null || usage === undefined) return tr('tokensHint', { total: formatTokens(task.tokens) })
+        return tr('tokensBreakdown', {
+          total: formatTokens(usage.total),
+          input: formatTokens(usage.input),
+          output: formatTokens(usage.output),
+          read: formatTokens(usage.cacheRead),
+          write: formatTokens(usage.cacheWrite),
+        })
+      }
+
       function renderCard(task) {
         const dragging = drag !== null && drag.id === task.id
         const tone = LANE_META[task.status] !== undefined ? LANE_META[task.status].tone : 'var(--dsw-alias-label-secondary)'
@@ -994,6 +1070,13 @@ window.__ModuleLoader__.load({
               ? h('span', { key: 'tag', className: 'tm-tag', title: tr('syncHint') }, tr('sessionTag'))
               : h('span', { key: 'tag', className: 'tm-tag' }, tr('projectTag')),
             h('span', { key: 'text', className: 'tm-meta-text' }, cardMeta(task)),
+            typeof task.tokens === 'number' && task.tokens > 0
+              ? h('span', {
+                  key: 'tokens',
+                  className: 'tm-tokens',
+                  title: tokenTitle(task),
+                }, '· ' + formatTokens(task.tokens) + ' ' + tr('tokensSuffix'))
+              : null,
           ]),
         ])
       }
@@ -1197,6 +1280,7 @@ window.__ModuleLoader__.load({
       '.tm-card-meta { padding-left: 2px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;',
       '  font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }',
       '.tm-meta-text { min-width: 0; }',
+      '.tm-tokens { color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }',
       '.tm-tag { display: inline-flex; align-items: center; height: 14px; padding: 0 4px; border-radius: 4px;',
       '  background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary);',
       '  font-size: 9.5px; line-height: 1; white-space: nowrap; }',

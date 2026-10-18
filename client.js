@@ -693,7 +693,9 @@ window.__ModuleLoader__.load({
           settled = true
           const nowRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
           if (nowRunning) {
-            releaseSessionTracker(id, trackersRef.current)
+            // A new run started before this stop was classified: keep the
+            // retained session so the new turn's `turn/end` replaces the stale
+            // reason, and let the card stay in Running.
             return
           }
           const reason = tracker.reason
@@ -703,15 +705,16 @@ window.__ModuleLoader__.load({
           finishCard(id, failed ? 'incomplete' : 'done')
           releaseSessionTracker(id, trackersRef.current)
         }
+        // Always give the stream a short beat: the sidebar's `running` flag and
+        // the durable `turn/end` event can arrive in either order, and settling
+        // on the previous turn's reason would pick the wrong lane.
+        const settleSoon = function () { window.setTimeout(settle, 400) }
         if (tracker.ready) {
-          settle()
+          settleSoon()
         } else {
           // The initial history page may still be landing when the run stops;
-          // give the event window one short beat so the terminal `turn/end`
-          // can be read before the fallback decides "completed".
-          Promise.resolve(tracker.reference.ready).then(function () {
-            window.setTimeout(settle, 300)
-          }).catch(function () {
+          // wait for it before scheduling the classification.
+          Promise.resolve(tracker.reference.ready).then(settleSoon).catch(function () {
             if (settled || tracker.disposed) return
             settled = true
             finishCard(id, 'done')

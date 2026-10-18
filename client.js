@@ -706,7 +706,12 @@ window.__ModuleLoader__.load({
         if (tracker.ready) {
           settle()
         } else {
-          Promise.resolve(tracker.reference.ready).then(settle).catch(function () {
+          // The initial history page may still be landing when the run stops;
+          // give the event window one short beat so the terminal `turn/end`
+          // can be read before the fallback decides "completed".
+          Promise.resolve(tracker.reference.ready).then(function () {
+            window.setTimeout(settle, 300)
+          }).catch(function () {
             if (settled || tracker.disposed) return
             settled = true
             finishCard(id, 'done')
@@ -1012,7 +1017,10 @@ window.__ModuleLoader__.load({
             : finished
         }
         if (task.status === 'incomplete') {
-          return tr('stoppedMeta', { time: clockTime(task.finishedAt || task.createdAt) })
+          const stopped = tr('stoppedMeta', { time: clockTime(task.finishedAt || task.createdAt) })
+          return typeof task.durationMs === 'number'
+            ? stopped + ' ' + tr('tookMeta', { time: elapsedText(task.durationMs) })
+            : stopped
         }
         return tr('createdMeta', { time: clockTime(task.createdAt) })
       }
@@ -1570,7 +1578,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'sessions'],
       apply(ctx) {
         moduleLocale = readLocaleService(ctx)
         moduleCtx = ctx

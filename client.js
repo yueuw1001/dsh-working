@@ -42,6 +42,9 @@ window.__ModuleLoader__.load({
       laneDone: 'Finished',
       laneIncomplete: 'Incomplete',
       clearFinished: 'Clear finished',
+      addProject: 'Add project',
+      addProjectPlaceholder: 'Name a project, Enter adds it to Queued',
+      projectTag: 'Project',
       empty: 'No tasks',
       remove: 'Delete task',
       rename: 'Rename task',
@@ -69,6 +72,9 @@ window.__ModuleLoader__.load({
       laneDone: '已结束',
       laneIncomplete: '未完成',
       clearFinished: '清理已结束',
+      addProject: '添加项目',
+      addProjectPlaceholder: '输入项目名称，回车加入待运行',
+      projectTag: '项目',
       empty: '暂无任务',
       remove: '删除任务',
       rename: '重命名任务',
@@ -660,6 +666,7 @@ window.__ModuleLoader__.load({
       const syncAvailable = board.syncAvailable
 
       const [editing, setEditing] = useState(null)
+      const [draft, setDraft] = useState('')
       const [drag, setDrag] = useState(null)
       const [drop, setDrop] = useState(null)
       const [now, setNow] = useState(function () { return Date.now() })
@@ -822,6 +829,18 @@ window.__ModuleLoader__.load({
       // Board mutations (no task creation: the controller owns that)
       // ----------------------------------------------------------------
 
+      /** Add a project of your own; it stays in Queued (the session sync never touches it). */
+      function addProject() {
+        const title = draft.trim().slice(0, 200)
+        if (title === '') return
+        const task = { id: uid(), title: title, status: 'queued', createdAt: Date.now() }
+        setBoardTasks(function (previous) {
+          const next = previous.concat([task])
+          return next.length > MAX_TASKS ? next.slice(next.length - MAX_TASKS) : next
+        })
+        setDraft('')
+      }
+
       function removeTask(id) {
         const task = tasksRef.current.filter(function (item) { return item.id === id })[0]
         if (task !== undefined && task.sessionId) {
@@ -973,7 +992,7 @@ window.__ModuleLoader__.load({
           }, [
             task.sessionId
               ? h('span', { key: 'tag', className: 'tm-tag', title: tr('syncHint') }, tr('sessionTag'))
-              : null,
+              : h('span', { key: 'tag', className: 'tm-tag' }, tr('projectTag')),
             h('span', { key: 'text', className: 'tm-meta-text' }, cardMeta(task)),
           ]),
         ])
@@ -1058,6 +1077,28 @@ window.__ModuleLoader__.load({
           ]),
           h('div', { key: 'body', className: 'tm-page-body' }, LANE_IDS.map(renderLane)),
           h('div', { key: 'foot', className: 'tm-page-foot' }, [
+            h('form', {
+              key: 'add',
+              className: 'tm-add-project',
+              onSubmit: function (event) { event.preventDefault(); addProject() },
+            }, [
+              h('input', {
+                key: 'input',
+                className: 'tm-input',
+                type: 'text',
+                value: draft,
+                maxLength: 200,
+                placeholder: tr('addProjectPlaceholder'),
+                'aria-label': tr('addProjectPlaceholder'),
+                onChange: function (event) { setDraft(event.target.value) },
+              }),
+              h('button', {
+                key: 'submit',
+                className: 'tm-primary',
+                type: 'submit',
+                disabled: draft.trim() === '',
+              }, tr('addProject')),
+            ]),
             h('span', { key: 'hint', className: 'tm-foot-hint', title: tr('syncHint') }, tr('pageHint')),
             doneCount > 0
               ? h('button', {
@@ -1173,10 +1214,16 @@ window.__ModuleLoader__.load({
       '  background: var(--dsw-alias-brand-primary); opacity: 0.9; box-shadow: 0 0 8px var(--dsw-alias-brand-primary); }',
       '.tm-empty { margin: auto 0; padding: 14px 0; text-align: center; font-size: 11px;',
       '  color: var(--dsw-alias-label-secondary); opacity: 0.7; }',
-      '.tm-page-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;',
+      '.tm-page-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 6px;',
       '  padding-top: 8px; border-top: 1px solid var(--dsw-alias-border-l1); }',
-      '.tm-foot-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }',
-      '.tm-link { margin-left: auto; border: 0; background: transparent; color: var(--dsw-alias-label-secondary);',
+      '.tm-add-project { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 240px; margin: 0; }',
+      '.tm-input { flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 9px; border-radius: 7px;',
+      '  border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base);',
+      '  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; outline: none; }',
+      '.tm-input::placeholder { color: var(--dsw-alias-label-secondary); opacity: 0.75; }',
+      '.tm-input:focus { border-color: var(--dsw-alias-brand-primary); }',
+      '.tm-foot-hint { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-link { border: 0; background: transparent; color: var(--dsw-alias-label-secondary);',
       '  font: inherit; font-size: 11px; padding: 4px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }',
       '.tm-link:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }',
       '.tm-primary { height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--dsw-alias-brand-primary);',
@@ -1193,6 +1240,7 @@ window.__ModuleLoader__.load({
       '.tm-migrate-title { font-size: 13px; font-weight: 600; }',
       '.tm-migrate-text { font-size: 12px; color: var(--dsw-alias-label-secondary); max-width: 260px; }',
       '@media (max-width: 980px) { .tm-page-body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); } }',
+      '@media (max-width: 900px) { .tm-foot-hint { display: none; } }',
       '@media (prefers-reduced-motion: reduce) { .tm-pulse::after { animation: none; opacity: 0; } }',
     ].join('\n')
 

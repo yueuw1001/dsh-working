@@ -1,0 +1,3 @@
+- insert:
+    - id: task-monitor
+      name: '@local/task-monitor'

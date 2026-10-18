@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Task Monitor",
+    "description": "A floating board that groups work into Queued, Running, Finished and Incomplete lanes. Drag cards between lanes and reorder them; drag the window or its edges to place and resize it."
+  }
+}

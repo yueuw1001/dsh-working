@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Task monitor board">
+  <defs>
+    <linearGradient id="tm-bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f6fed"/>
+      <stop offset="1" stop-color="#17408f"/>
+    </linearGradient>
+    <linearGradient id="tm-glow" x1="32" y1="8" x2="32" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8ec5ff"/>
+      <stop offset="1" stop-color="#4f95ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#tm-bg)"/>
+  <rect x="12" y="14" width="10" height="36" rx="3.5" fill="#ffffff" opacity="0.24"/>
+  <rect x="27" y="14" width="10" height="26" rx="3.5" fill="#ffffff" opacity="0.42"/>
+  <rect x="42" y="14" width="10" height="16" rx="3.5" fill="#ffffff" opacity="0.62"/>
+  <circle cx="17" cy="42" r="2.6" fill="#ffffff"/>
+  <circle cx="32" cy="34" r="2.6" fill="url(#tm-glow)"/>
+  <circle cx="47" cy="24" r="2.6" fill="#7ef0b2"/>
+  <path d="M12 50h40" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2" stroke-linecap="round"/>
+</svg>

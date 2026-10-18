@@ -102,6 +102,8 @@ window.__ModuleLoader__.load({
     const DICTS = { en: en, zh: zh }
     /** The Client locale service, attached by `apply` (undefined off-host). */
     let moduleLocale
+    /** The plugin's Client context, kept for optional service access. */
+    let moduleCtx
 
     // ------------------------------------------------------------------
     // Small helpers
@@ -326,22 +328,15 @@ window.__ModuleLoader__.load({
           return
         }
         if (index === -1) return
+        // The stop transition is NOT decided here: only the retained session's
+        // `turn/end` reason can distinguish a normal finish from an error or an
+        // interruption (see the finish effect). This fold only keeps the label
+        // current while the outcome is being resolved.
         const card = next[index]
-        if (card.status !== 'running') {
-          if (card.title !== row.title) {
-            next[index] = { ...card, title: row.title }
-            changed = true
-          }
-          return
+        if (card.title !== row.title) {
+          next[index] = { ...card, title: row.title }
+          changed = true
         }
-        next[index] = {
-          ...card,
-          title: row.title,
-          status: 'done',
-          finishedAt: stamp,
-          durationMs: typeof card.startedAt === 'number' ? stamp - card.startedAt : undefined,
-        }
-        changed = true
       })
       return changed ? next : tasks
     }
@@ -379,6 +374,116 @@ window.__ModuleLoader__.load({
 
     function IconChevronDown() {
       return iconSvg(h('path', { d: 'M4 6.5 8 10.5l4-4' }))
+    }
+
+    // ------------------------------------------------------------------
+    // Session outcome tracking (completed vs error/interrupted)
+    // ------------------------------------------------------------------
+    //
+    // The sidebar status store only carries `running` / `completionUnread` /
+    // `pendingInteraction`, so it cannot tell a normal finish from an error or
+    // a user stop. The durable Session event log can: the last `turn/end`
+    // reason is `completed` for a normal finish, and `error`, `aborted`
+    // (user stop), `interrupted`, `max-tokens`, `blocked`, … otherwise. The
+    // plugin retains only the sessions it is actually tracking (a handful at
+    // most) and releases each one right after its terminal lane is decided.
+
+    /** The optional Client sessions service (`ctx.sessions` face). */
+    function getSessionsService() {
+      try {
+        if (moduleCtx === undefined || moduleCtx === null || typeof moduleCtx.get !== 'function') return undefined
+        const service = moduleCtx.get('sessions')
+        return service === null ? undefined : service
+      } catch (error) {
+        return undefined
+      }
+    }
+
+    /** The latest `turn/end` reason kind in one retained event window. */
+    function lastTurnReason(window) {
+      try {
+        if (window === null || window === undefined || !Array.isArray(window.entries)) return undefined
+        for (let index = window.entries.length - 1; index >= 0; index -= 1) {
+          const entry = window.entries[index]
+          if (entry === null || entry === undefined || entry.type !== 'event') continue
+          const event = entry.event
+          if (event === null || event === undefined || event.type !== 'turn/end') continue
+          const reason = event.data !== null && event.data !== undefined ? event.data.reason : undefined
+          if (reason !== null && reason !== undefined && typeof reason.kind === 'string') return reason.kind
+        }
+      } catch (error) {
+        // A malformed window is treated as "unknown outcome".
+      }
+      return undefined
+    }
+
+    /** Retain one session and record its latest turn outcome; null when unavailable. */
+    function createSessionTracker(sessionId, trackers) {
+      if (trackers.has(sessionId)) return trackers.get(sessionId)
+      // A monitor never needs an unbounded number of retained histories.
+      if (trackers.size >= 12) return null
+      const service = getSessionsService()
+      if (service === undefined || typeof service.retain !== 'function') return null
+      let reference
+      try {
+        reference = service.retain(sessionId, { source: 'controllerOperation' })
+      } catch (error) {
+        return null
+      }
+      const tracker = {
+        id: sessionId,
+        reference: reference,
+        reason: undefined,
+        error: null,
+        ready: false,
+        disposed: false,
+        unsubscribe: null,
+      }
+      trackers.set(sessionId, tracker)
+      Promise.resolve(reference.ready).then(function (binding) {
+        if (tracker.disposed) return
+        tracker.ready = true
+        try {
+          const session = binding.session
+          const events = binding.eventSource
+          const readReason = function () { tracker.reason = lastTurnReason(events.getSnapshot()) }
+          const readError = function () {
+            const snapshot = session.getSnapshot()
+            tracker.error = snapshot !== null && snapshot !== undefined ? snapshot.lastAgentError : null
+          }
+          readReason()
+          readError()
+          const offEvents = events.subscribe(readReason)
+          const offSession = session.subscribe(readError)
+          tracker.unsubscribe = function () {
+            try { offEvents() } catch (error) { /* ignore */ }
+            try { offSession() } catch (error) { /* ignore */ }
+          }
+        } catch (error) {
+          // Best effort: without the window the outcome falls back to unknown.
+        }
+      }).catch(function () {
+        tracker.ready = true
+      })
+      return tracker
+    }
+
+    /** Unsubscribe and release one retained session. */
+    function releaseSessionTracker(sessionId, trackers) {
+      const tracker = trackers.get(sessionId)
+      if (tracker === undefined) return
+      trackers.delete(sessionId)
+      tracker.disposed = true
+      try {
+        if (typeof tracker.unsubscribe === 'function') tracker.unsubscribe()
+      } catch (error) {
+        // ignore
+      }
+      try {
+        if (typeof tracker.reference.release === 'function') tracker.reference.release()
+      } catch (error) {
+        // ignore
+      }
     }
 
     // ------------------------------------------------------------------
@@ -443,6 +548,8 @@ window.__ModuleLoader__.load({
       dragRef.current = drag
       const cancelledRef = useRef(false)
       const laneRefs = useRef({})
+      const trackersRef = useRef(new Map())
+      const previousRunningRef = useRef(null)
 
       // Persist the board and the window geometry on every committed change.
       useEffect(function () {
@@ -510,6 +617,103 @@ window.__ModuleLoader__.load({
           return next.length === previous.length ? previous : next
         })
       }, [sessionSignature])
+
+      // Classify every run that just stopped. A run is retained while it is
+      // live, so the terminal lane can be read from its `turn/end` reason:
+      // `completed` finishes the card, anything else (error, user stop,
+      // interruption, token/blocked end) moves it to Incomplete.
+      useEffect(function () {
+        const rows = rowsRef.current
+        if (rows.length === 0) return
+        const running = {}
+        rows.forEach(function (row) { if (row.running) running[row.id] = true })
+        Object.keys(running).forEach(function (id) { ensureTracker(id) })
+        const previous = previousRunningRef.current
+        if (previous === null) {
+          tasksRef.current.filter(function (task) {
+            return task.status === 'running' && task.source === 'session' && task.auto !== false
+          }).forEach(function (task) {
+            if (running[task.sessionId] !== true) finishTracked(task.sessionId)
+          })
+        } else {
+          Object.keys(previous).forEach(function (id) {
+            if (running[id] !== true) finishTracked(id)
+          })
+        }
+        previousRunningRef.current = running
+      }, [sessionSignature])
+
+      // Release every retained session when the pane unmounts.
+      useEffect(function () {
+        return function () {
+          const trackers = trackersRef.current
+          Array.from(trackers.keys()).forEach(function (id) { releaseSessionTracker(id, trackers) })
+        }
+      }, [])
+
+      /** Retain (or reuse) the tracker of one running session. */
+      function ensureTracker(id) {
+        return createSessionTracker(id, trackersRef.current)
+      }
+
+      /** Move one auto card to its terminal lane with measured duration. */
+      function finishCard(id, lane) {
+        setTasks(function (previous) {
+          let changed = false
+          const next = previous.map(function (task) {
+            if (task.source !== 'session' || task.sessionId !== id || task.auto === false) return task
+            if (task.status !== 'running') return task
+            changed = true
+            const stamp = Date.now()
+            return {
+              ...task,
+              status: lane,
+              finishedAt: stamp,
+              durationMs: typeof task.startedAt === 'number' ? stamp - task.startedAt : undefined,
+            }
+          })
+          return changed ? next : previous
+        })
+        setNow(Date.now())
+      }
+
+      /** Resolve the terminal lane of one stopped session and release it. */
+      function finishTracked(id) {
+        const stillRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
+        if (stillRunning) return
+        let tracker = trackersRef.current.get(id)
+        if (tracker === undefined) tracker = ensureTracker(id)
+        if (tracker === null || tracker === undefined) {
+          finishCard(id, 'done')
+          return
+        }
+        let settled = false
+        const settle = function () {
+          if (settled || tracker.disposed) return
+          settled = true
+          const nowRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
+          if (nowRunning) {
+            releaseSessionTracker(id, trackersRef.current)
+            return
+          }
+          const reason = tracker.reason
+          const error = tracker.error
+          const failed = (reason !== undefined && reason !== 'completed')
+            || (reason === undefined && typeof error === 'string' && error !== '')
+          finishCard(id, failed ? 'incomplete' : 'done')
+          releaseSessionTracker(id, trackersRef.current)
+        }
+        if (tracker.ready) {
+          settle()
+        } else {
+          Promise.resolve(tracker.reference.ready).then(settle).catch(function () {
+            if (settled || tracker.disposed) return
+            settled = true
+            finishCard(id, 'done')
+            releaseSessionTracker(id, trackersRef.current)
+          })
+        }
+      }
 
       // Keep the window reachable when the viewport changes.
       useEffect(function () {
@@ -1369,6 +1573,7 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply(ctx) {
         moduleLocale = readLocaleService(ctx)
+        moduleCtx = ctx
 
         ctx.effect(function () {
           let dispose = function () {}

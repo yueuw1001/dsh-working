@@ -1,16 +1,16 @@
 /**
  * Client half of the Task Monitor bundle.
  *
- * A frame-wide floating board (`shell.overlay`) that keeps four lanes of work:
- * Queued, Running, Finished and Incomplete. The reader drags a card onto another
- * lane (or inside its own lane) with the pointer, drags the title bar to move
- * the window, and drags an edge/corner to resize it. Board contents and window
- * geometry survive a reload through localStorage.
+ * The board lives in a central panel opened from a left-sidebar panel icon
+ * (`sidebar.panellist` + `main`). A hidden controller mounted in
+ * `shell.overlay` watches the sidebar sessions at all times, so runs are
+ * collected even while the panel is closed. Task cards are created only by
+ * that controller: there is no manual "add task" form.
  *
- * The module is a dynamic Client module: `window.__ModuleLoader__.load` returns
- * `{ inject, apply }`, React comes from the browser module table, and every
- * style is scoped under the `tm-` prefix and built from `--dsw-alias-*` theme
- * tokens so it follows light/dark switching like the host UI.
+ * A session that starts running gains a card in Running. When it stops, the
+ * card's terminal lane comes from the retained session's last `turn/end`
+ * reason: `completed` → Finished; error / user stop / interruption /
+ * token-or-blocked end → Incomplete.
  */
 window.__ModuleLoader__.load({
   id: '@local/task-monitor',
@@ -21,9 +21,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
-    /** Locale namespace of the plugin's own runtime copy. */
     const NS = 'taskMonitor'
-    /** localStorage key holding the board and the window geometry. */
+    const PANEL_ID = 'task-monitor'
     const STORAGE_KEY = 'dsh.task-monitor.board.v1'
     const LANE_IDS = ['queued', 'running', 'done', 'incomplete']
     const LANE_META = {
@@ -32,9 +31,6 @@ window.__ModuleLoader__.load({
       done: { key: 'laneDone', tone: 'var(--dsw-alias-state-success-primary)' },
       incomplete: { key: 'laneIncomplete', tone: 'var(--dsw-alias-state-warn-primary)' },
     }
-    const MIN_WIDTH = 600
-    const MIN_HEIGHT = 300
-    const EDGE = 10
     const MAX_TASKS = 400
 
     const en = {
@@ -45,27 +41,23 @@ window.__ModuleLoader__.load({
       laneRunning: 'Running',
       laneDone: 'Finished',
       laneIncomplete: 'Incomplete',
-      addPlaceholder: 'Add a task, then press Enter',
-      add: 'Add',
       clearFinished: 'Clear finished',
       empty: 'No tasks',
       remove: 'Delete task',
       rename: 'Rename task',
-      collapse: 'Collapse',
-      expand: 'Expand',
-      close: 'Close',
-      reopen: 'Task monitor',
+      syncOn: 'Auto-sync on',
+      syncOff: 'Auto-sync unavailable',
+      syncHint: 'Running sidebar sessions appear in Running; a normal finish moves the card to Finished, an error or interruption to Incomplete',
+      pageHint: 'Running sessions are collected automatically',
+      sessionTag: 'Session',
       runningMeta: 'Running {time}',
       createdMeta: 'Created {time}',
       finishedMeta: 'Finished {time}',
       stoppedMeta: 'Stopped {time}',
       tookMeta: '· took {time}',
-      hint: 'Drag cards between lanes; double-click a title to rename',
-      sessionTag: 'Session',
-      syncOn: 'Auto-sync on',
-      syncOff: 'Auto-sync unavailable',
-      syncHint: 'Running sidebar sessions appear in Running; when a session stops, its card moves to Finished',
-      dockDescription: 'Running / finished task board in the side panel',
+      movedTitle: 'Task Monitor moved to the left sidebar',
+      movedBody: 'This tab is retired. Open the board from the Task Monitor icon in the left sidebar.',
+      movedOpen: 'Open the board',
     }
 
     const zh = {
@@ -76,33 +68,27 @@ window.__ModuleLoader__.load({
       laneRunning: '运行中',
       laneDone: '已结束',
       laneIncomplete: '未完成',
-      addPlaceholder: '输入任务，回车添加到所选状态',
-      add: '添加',
       clearFinished: '清理已结束',
       empty: '暂无任务',
       remove: '删除任务',
       rename: '重命名任务',
-      collapse: '收起',
-      expand: '展开',
-      close: '关闭',
-      reopen: '任务监控',
+      syncOn: '自动同步',
+      syncOff: '自动同步不可用',
+      syncHint: '侧边栏中正在运行的会话会自动进入「运行中」；正常完成移到「已结束」，出错或被中断移到「未完成」',
+      pageHint: '运行中的会话会自动收录',
+      sessionTag: '会话',
       runningMeta: '运行中 {time}',
       createdMeta: '创建于 {time}',
       finishedMeta: '完成于 {time}',
       stoppedMeta: '停止于 {time}',
       tookMeta: '· 用时 {time}',
-      hint: '拖动卡片切换状态；双击标题可重命名',
-      sessionTag: '会话',
-      syncOn: '自动同步',
-      syncOff: '自动同步不可用',
-      syncHint: '侧边栏中正在运行的会话会自动出现在「运行中」，会话停止后自动移到「已结束」',
-      dockDescription: '侧边栏里的运行中 / 已结束任务看板',
+      movedTitle: '任务监控已移到左侧边栏',
+      movedBody: '这个标签页已停用，请从左侧边栏的「任务监控」图标打开看板。',
+      movedOpen: '打开看板',
     }
 
     const DICTS = { en: en, zh: zh }
-    /** The Client locale service, attached by `apply` (undefined off-host). */
     let moduleLocale
-    /** The plugin's Client context, kept for optional service access. */
     let moduleCtx
 
     // ------------------------------------------------------------------
@@ -133,7 +119,7 @@ window.__ModuleLoader__.load({
       try {
         if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
       } catch (error) {
-        // A sandboxed origin may not expose crypto.randomUUID; the fallback below is enough.
+        // Fall through.
       }
       return 'task-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
     }
@@ -170,62 +156,38 @@ window.__ModuleLoader__.load({
       return 'en'
     }
 
+    function useActiveLocale(locale) {
+      const [active, setActive] = useState(function () { return activeLocaleOf(locale) })
+      useEffect(function () {
+        setActive(activeLocaleOf(locale))
+        if (locale === undefined || locale === null || typeof locale.subscribe !== 'function') return undefined
+        function onLocaleChange() { setActive(activeLocaleOf(locale)) }
+        try {
+          return locale.subscribe(onLocaleChange)
+        } catch (error) {
+          return undefined
+        }
+      }, [locale])
+      return active
+    }
+
+    function useTranslator(locale) {
+      const active = useActiveLocale(locale)
+      const dict = dictFor(active)
+      const tr = useCallback(function (key, params) {
+        return translate(dict, key, params)
+      }, [dict])
+      return tr
+    }
+
     // ------------------------------------------------------------------
-    // Persistence and geometry
+    // Persistence and the shared board store
     // ------------------------------------------------------------------
 
     function isTask(value) {
       if (value === null || typeof value !== 'object') return false
       if (typeof value.id !== 'string' || typeof value.title !== 'string') return false
       return LANE_IDS.indexOf(value.status) !== -1 && typeof value.createdAt === 'number'
-    }
-
-    function isGeom(value) {
-      if (value === null || typeof value !== 'object') return false
-      return ['left', 'top', 'width', 'height'].every(function (key) {
-        return typeof value[key] === 'number' && Number.isFinite(value[key])
-      })
-    }
-
-    function clampNumber(value, min, max) {
-      return Math.min(Math.max(min, value), Math.max(min, max))
-    }
-
-    function clampOrigin(start, size, viewport) {
-      const inside = viewport - size - EDGE
-      return inside >= EDGE
-        ? clampNumber(start, EDGE, inside)
-        : clampNumber(start, viewport - size - EDGE, viewport - EDGE)
-    }
-
-    function viewportSize() {
-      const width = typeof window !== 'undefined' ? window.innerWidth : 1280
-      const height = typeof window !== 'undefined' ? window.innerHeight : 800
-      return { width: width, height: height }
-    }
-
-    function clampGeom(value) {
-      const viewport = viewportSize()
-      const width = clampNumber(value.width, MIN_WIDTH, Math.max(MIN_WIDTH, viewport.width - EDGE * 2))
-      const height = clampNumber(value.height, MIN_HEIGHT, Math.max(MIN_HEIGHT, viewport.height - EDGE * 2))
-      return {
-        left: clampOrigin(value.left, width, viewport.width),
-        top: clampOrigin(value.top, height, viewport.height),
-        width: width,
-        height: height,
-      }
-    }
-
-    function defaultGeom() {
-      const viewport = viewportSize()
-      const width = Math.min(840, Math.max(MIN_WIDTH, viewport.width - 160))
-      const height = Math.min(500, Math.max(MIN_HEIGHT, viewport.height - 240))
-      return clampGeom({
-        left: viewport.width - width - 28,
-        top: 92,
-        width: width,
-        height: height,
-      })
     }
 
     function readStored() {
@@ -245,18 +207,16 @@ window.__ModuleLoader__.load({
                 startedAt: typeof task.startedAt === 'number' ? task.startedAt : undefined,
                 finishedAt: typeof task.finishedAt === 'number' ? task.finishedAt : undefined,
                 durationMs: typeof task.durationMs === 'number' ? task.durationMs : undefined,
+                sessionId: typeof task.sessionId === 'string' ? task.sessionId : undefined,
+                source: task.source === 'session' ? 'session' : undefined,
+                auto: task.auto !== false,
               }
             })
           : []
-        return {
-          tasks: tasks,
-          geom: isGeom(data.geom) ? data.geom : null,
-          collapsed: data.collapsed === true,
-          hidden: data.hidden === true,
-          ignored: Array.isArray(data.ignored)
-            ? data.ignored.filter(function (id) { return typeof id === 'string' }).slice(0, 200)
-            : [],
-        }
+        const ignored = Array.isArray(data.ignored)
+          ? data.ignored.filter(function (id) { return typeof id === 'string' }).slice(0, 200)
+          : []
+        return { tasks: tasks, ignored: ignored }
       } catch (error) {
         return null
       }
@@ -265,130 +225,79 @@ window.__ModuleLoader__.load({
     function writeStored(state) {
       try {
         if (typeof window === 'undefined' || !window.localStorage) return
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          tasks: state.tasks,
+          ignored: state.ignored,
+        }))
       } catch (error) {
         // Storage may be unavailable or full; the board still works in memory.
       }
     }
 
-    /**
-     * Reconcile the auto-tracked session cards with the live sidebar rows.
-     *
-     * A session that starts running gains a card in the Running lane; when it
-     * stops, that card moves to Finished with its measured duration. Only cards
-     * this module created (`source: 'session'`, `auto !== false`) are touched:
-     * a card the reader dragged to another lane is handed over to manual
-     * control, and a card the reader deleted stays suppressed until the session
-     * next starts a run (see the `ignored` list).
-     *
-     * @param tasks - current board.
-     * @param rows - `{ id, title, running }` rows for the sidebar sessions.
-     * @param ignored - session ids whose card the reader deleted while running.
-     * @returns the same array when nothing changed, a new array otherwise.
-     */
-    function syncSessionCards(tasks, rows, ignored) {
-      let changed = false
-      const next = tasks.slice()
-      const findAuto = function (sessionId) {
-        for (let index = 0; index < next.length; index += 1) {
-          const task = next[index]
-          if (task.source === 'session' && task.sessionId === sessionId && task.auto !== false) return index
-        }
-        return -1
-      }
-      rows.forEach(function (row) {
-        const index = findAuto(row.id)
-        const stamp = Date.now()
-        if (row.running) {
-          if (index === -1) {
-            if (ignored.indexOf(row.id) !== -1) return
-            next.push({
-              id: uid(),
-              title: row.title,
-              status: 'running',
-              createdAt: stamp,
-              startedAt: stamp,
-              source: 'session',
-              sessionId: row.id,
-              auto: true,
-            })
-            changed = true
-            return
-          }
-          const card = next[index]
-          let updated = card
-          if (card.status !== 'running') {
-            updated = { ...updated, status: 'running', startedAt: stamp, finishedAt: undefined, durationMs: undefined }
-          }
-          if (updated.title !== row.title) updated = { ...updated, title: row.title }
-          if (updated !== card) {
-            next[index] = updated
-            changed = true
-          }
-          return
-        }
-        if (index === -1) return
-        // The stop transition is NOT decided here: only the retained session's
-        // `turn/end` reason can distinguish a normal finish from an error or an
-        // interruption (see the finish effect). This fold only keeps the label
-        // current while the outcome is being resolved.
-        const card = next[index]
-        if (card.title !== row.title) {
-          next[index] = { ...card, title: row.title }
-          changed = true
-        }
+    const initialBoard = readStored()
+    let boardState = {
+      tasks: initialBoard !== null && initialBoard.tasks !== null ? initialBoard.tasks : [],
+      ignored: initialBoard !== null && initialBoard.ignored !== null ? initialBoard.ignored : [],
+      syncAvailable: false,
+    }
+    const boardListeners = new Set()
+
+    function boardSnapshot() {
+      return boardState
+    }
+
+    function subscribeBoard(listener) {
+      boardListeners.add(listener)
+      return function () { boardListeners.delete(listener) }
+    }
+
+    function publishBoard() {
+      writeStored(boardState)
+      boardListeners.forEach(function (listener) {
+        try { listener() } catch (error) { /* one broken listener must not stop the others */ }
       })
-      return changed ? next : tasks
+    }
+
+    function updateBoard(patch) {
+      const next = { ...boardState, ...patch }
+      if (next.tasks === boardState.tasks && next.ignored === boardState.ignored && next.syncAvailable === boardState.syncAvailable) return
+      boardState = next
+      publishBoard()
+    }
+
+    function setBoardTasks(updater) {
+      const next = updater(boardState.tasks)
+      if (next !== boardState.tasks) updateBoard({ tasks: next })
+    }
+
+    function setBoardIgnored(updater) {
+      const next = updater(boardState.ignored)
+      if (next !== boardState.ignored) updateBoard({ ignored: next })
+    }
+
+    function setSyncAvailable(next) {
+      if (boardState.syncAvailable !== next) updateBoard({ syncAvailable: next })
+    }
+
+    function useBoardState() {
+      const [state, setState] = useState(boardSnapshot)
+      useEffect(function () {
+        setState(boardSnapshot())
+        return subscribeBoard(function () { setState(boardSnapshot()) })
+      }, [])
+      return state
     }
 
     // ------------------------------------------------------------------
-    // Icons
-    // ------------------------------------------------------------------
-
-    function iconSvg(paths) {
-      return h('svg', {
-        viewBox: '0 0 16 16',
-        width: 14,
-        height: 14,
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 1.6,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': true,
-        focusable: false,
-      }, paths)
-    }
-
-    function IconCollapse() {
-      return iconSvg(h('path', { d: 'M3.5 8h9' }))
-    }
-
-    function IconExpand() {
-      return iconSvg(h('path', { d: 'M3.5 10.5 8 6l4.5 4.5' }))
-    }
-
-    function IconClose() {
-      return iconSvg(h('path', { d: 'M4.5 4.5l7 7M11.5 4.5l-7 7' }))
-    }
-
-    function IconChevronDown() {
-      return iconSvg(h('path', { d: 'M4 6.5 8 10.5l4-4' }))
-    }
-
-    // ------------------------------------------------------------------
-    // Session outcome tracking (completed vs error/interrupted)
+    // Session outcome tracking
     // ------------------------------------------------------------------
     //
-    // The sidebar status store only carries `running` / `completionUnread` /
-    // `pendingInteraction`, so it cannot tell a normal finish from an error or
-    // a user stop. The durable Session event log can: the last `turn/end`
-    // reason is `completed` for a normal finish, and `error`, `aborted`
-    // (user stop), `interrupted`, `max-tokens`, `blocked`, … otherwise. The
-    // plugin retains only the sessions it is actually tracking (a handful at
-    // most) and releases each one right after its terminal lane is decided.
+    // The sidebar status store carries only `running` / `completionUnread` /
+    // `pendingInteraction`; it cannot distinguish a normal finish from an
+    // error or a user stop. The durable session event window can: the last
+    // `turn/end` reason decides the lane. Only tracked sessions are retained,
+    // and each is released right after its terminal lane is written.
 
-    /** The optional Client sessions service (`ctx.sessions` face). */
     function getSessionsService() {
       try {
         if (moduleCtx === undefined || moduleCtx === null || typeof moduleCtx.get !== 'function') return undefined
@@ -399,7 +308,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The latest `turn/end` reason kind in one retained event window. */
     function lastTurnReason(window) {
       try {
         if (window === null || window === undefined || !Array.isArray(window.entries)) return undefined
@@ -417,10 +325,8 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    /** Retain one session and record its latest turn outcome; null when unavailable. */
     function createSessionTracker(sessionId, trackers) {
       if (trackers.has(sessionId)) return trackers.get(sessionId)
-      // A monitor never needs an unbounded number of retained histories.
       if (trackers.size >= 12) return null
       const service = getSessionsService()
       if (service === undefined || typeof service.retain !== 'function') return null
@@ -460,7 +366,7 @@ window.__ModuleLoader__.load({
             try { offSession() } catch (error) { /* ignore */ }
           }
         } catch (error) {
-          // Best effort: without the window the outcome falls back to unknown.
+          // Best effort.
         }
       }).catch(function () {
         tracker.ready = true
@@ -468,7 +374,6 @@ window.__ModuleLoader__.load({
       return tracker
     }
 
-    /** Unsubscribe and release one retained session. */
     function releaseSessionTracker(sessionId, trackers) {
       const tracker = trackers.get(sessionId)
       if (tracker === undefined) return
@@ -486,95 +391,121 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ------------------------------------------------------------------
-    // Component
-    // ------------------------------------------------------------------
-
-    function TaskMonitorPanel(props) {
-      const locale = props !== null && props !== undefined && props.locale ? props.locale : moduleLocale
-      const docked = props !== null && props !== undefined && props.mode === 'dock'
-      const [active, setActive] = useState(function () { return activeLocaleOf(locale) })
-
-      useEffect(function () {
-        setActive(activeLocaleOf(locale))
-        if (locale === undefined || locale === null || typeof locale.subscribe !== 'function') return undefined
-        function onLocaleChange() {
-          setActive(activeLocaleOf(locale))
+    /**
+     * Reconcile running session cards: a session that started running gains a
+     * card (unless the reader deleted it for this run), and labels follow the
+     * session title. Terminal lanes are decided by the tracker, not here.
+     */
+    function syncSessionCards(tasks, rows, ignored) {
+      let changed = false
+      const next = tasks.slice()
+      const findAuto = function (sessionId) {
+        for (let index = 0; index < next.length; index += 1) {
+          const task = next[index]
+          if (task.source === 'session' && task.sessionId === sessionId && task.auto !== false) return index
         }
-        try {
-          return locale.subscribe(onLocaleChange)
-        } catch (error) {
-          return undefined
+        return -1
+      }
+      rows.forEach(function (row) {
+        const index = findAuto(row.id)
+        if (row.running) {
+          if (index === -1) {
+            if (ignored.indexOf(row.id) !== -1) return
+            const stamp = Date.now()
+            next.push({
+              id: uid(),
+              title: row.title,
+              status: 'running',
+              createdAt: stamp,
+              startedAt: stamp,
+              source: 'session',
+              sessionId: row.id,
+              auto: true,
+            })
+            changed = true
+            return
+          }
+          const card = next[index]
+          let updated = card
+          if (card.status !== 'running') {
+            updated = { ...updated, status: 'running', startedAt: Date.now(), finishedAt: undefined, durationMs: undefined }
+          }
+          if (updated.title !== row.title) updated = { ...updated, title: row.title }
+          if (updated !== card) {
+            next[index] = updated
+            changed = true
+          }
+          return
         }
-      }, [locale])
-
-      const dict = dictFor(active)
-      const tr = useCallback(function (key, params) {
-        return translate(dict, key, params)
-      }, [dict])
-
-      const [boot] = useState(readStored)
-      const [tasks, setTasks] = useState(function () {
-        return boot !== null && boot.tasks !== null ? boot.tasks : []
+        if (index === -1) return
+        const card = next[index]
+        if (card.title !== row.title) {
+          next[index] = { ...card, title: row.title }
+          changed = true
+        }
       })
-      const [geom, setGeom] = useState(function () {
-        return boot !== null && boot.geom !== null ? clampGeom(boot.geom) : defaultGeom()
-      })
-      const [collapsed, setCollapsed] = useState(function () {
-        return boot !== null && boot.collapsed === true
-      })
-      const [hidden, setHidden] = useState(function () {
-        return boot !== null && boot.hidden === true
-      })
-      const [ignored, setIgnored] = useState(function () {
-        return boot !== null && Array.isArray(boot.ignored) ? boot.ignored : []
-      })
-      const [draft, setDraft] = useState('')
-      const [targetLane, setTargetLane] = useState('queued')
-      const [editing, setEditing] = useState(null)
-      const [drag, setDrag] = useState(null)
-      const [drop, setDrop] = useState(null)
-      const [now, setNow] = useState(function () { return Date.now() })
+      return changed ? next : tasks
+    }
 
-      const geomRef = useRef(geom)
-      geomRef.current = geom
-      const tasksRef = useRef(tasks)
-      tasksRef.current = tasks
-      const editingRef = useRef(editing)
-      editingRef.current = editing
-      const ignoredRef = useRef(ignored)
-      ignoredRef.current = ignored
-      const dragRef = useRef(drag)
-      dragRef.current = drag
-      const cancelledRef = useRef(false)
-      const laneRefs = useRef({})
-      const trackersRef = useRef(new Map())
-      const previousRunningRef = useRef(null)
+    // ------------------------------------------------------------------
+    // Icons
+    // ------------------------------------------------------------------
 
-      // Persist the board and the window geometry on every committed change.
-      useEffect(function () {
-        writeStored({ tasks: tasks, geom: geom, collapsed: collapsed, hidden: hidden, ignored: ignored })
-      }, [tasks, geom, collapsed, hidden, ignored])
+    function IconBoard(iconProps) {
+      const size = iconProps !== null && iconProps !== undefined && typeof iconProps.size === 'number' ? iconProps.size : 16
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: size,
+        height: size,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.3,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, [
+        h('rect', { key: 'frame', x: 1.8, y: 2.2, width: 12.4, height: 11.6, rx: 2.2 }),
+        h('path', { key: 'cols', d: 'M5.6 5.2v5.6M8 5.2v3.4M10.4 5.2v2.2' }),
+      ])
+    }
 
-      // ----------------------------------------------------------------
-      // Live sync with the sidebar's sessions
-      // ----------------------------------------------------------------
-      //
-      // Every slot entry receives the standard session hooks: `useSessions`
-      // selects from the session list (ids + byId), and `useSessionStatus`
-      // selects from the per-session status Map (`running`, pendingInteraction,
-      // completionUnread). They are optional so the panel still works where a
-      // slot omits them; the object identities only change when the snapshot
-      // changes, which keeps the reconciliation cheap.
-      const autoSync = typeof props !== 'undefined' && props !== null
+    function IconClose() {
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: 11,
+        height: 11,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.6,
+        strokeLinecap: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, h('path', { d: 'M4.5 4.5l7 7M11.5 4.5l-7 7' }))
+    }
+
+    /** The left sidebar's panel glyph. */
+    function PanelIcon(iconProps) {
+      return IconBoard(iconProps)
+    }
+
+    function panelTitle() {
+      return translate(dictFor(activeLocaleOf(moduleLocale)), 'title')
+    }
+
+    // ------------------------------------------------------------------
+    // Controller: always mounted, drives the shared store
+    // ------------------------------------------------------------------
+
+    function MonitorController(props) {
+      const autoSync = props !== null && props !== undefined
         && typeof props.useSessions === 'function'
         && typeof props.useSessionStatus === 'function'
-      const sessionsState = autoSync
-        ? props.useSessions(function (state) { return state })
-        : undefined
-      const statusState = autoSync
-        ? props.useSessionStatus(function (state) { return state })
-        : undefined
+      const sessionsState = autoSync ? props.useSessions(function (state) { return state }) : undefined
+      const statusState = autoSync ? props.useSessionStatus(function (state) { return state }) : undefined
+
+      useEffect(function () { setSyncAvailable(autoSync) }, [autoSync])
+
       const sessionRows = useMemo(function () {
         if (!autoSync) return []
         const byId = (sessionsState !== null && sessionsState !== undefined && sessionsState.byId) || {}
@@ -589,39 +520,41 @@ window.__ModuleLoader__.load({
           const status = statusState !== null && statusState !== undefined && typeof statusState.get === 'function'
             ? statusState.get(id)
             : undefined
-          const running = !!(view.running || (status !== null && status !== undefined && status.running))
           rows.push({
             id: id,
             title: String(view.displayTitle || view.title || view.name || id),
-            running: running,
+            running: !!(view.running || (status !== null && status !== undefined && status.running)),
           })
         })
         return rows
       }, [autoSync, sessionsState, statusState])
+
       const sessionSignature = useMemo(function () {
         return sessionRows.map(function (row) {
           return row.id + (row.running ? '+' : '-') + ':' + row.title
         }).join('|')
       }, [sessionRows])
+
       const rowsRef = useRef(sessionRows)
       rowsRef.current = sessionRows
+      const trackersRef = useRef(new Map())
+      const previousRunningRef = useRef(null)
 
+      // Collect running sessions and keep the auto-cards' labels current.
       useEffect(function () {
         const rows = rowsRef.current
         if (rows.length === 0) return
-        setTasks(function (previous) { return syncSessionCards(previous, rows, ignoredRef.current) })
+        const ignored = boardSnapshot().ignored
+        setBoardTasks(function (previous) { return syncSessionCards(previous, rows, ignored) })
         const runningIds = {}
         rows.forEach(function (row) { if (row.running) runningIds[row.id] = true })
-        setIgnored(function (previous) {
+        setBoardIgnored(function (previous) {
           const next = previous.filter(function (id) { return runningIds[id] === true })
           return next.length === previous.length ? previous : next
         })
       }, [sessionSignature])
 
-      // Classify every run that just stopped. A run is retained while it is
-      // live, so the terminal lane can be read from its `turn/end` reason:
-      // `completed` finishes the card, anything else (error, user stop,
-      // interruption, token/blocked end) moves it to Incomplete.
+      // Retain newly running sessions, and classify the ones that just stopped.
       useEffect(function () {
         const rows = rowsRef.current
         if (rows.length === 0) return
@@ -630,7 +563,7 @@ window.__ModuleLoader__.load({
         Object.keys(running).forEach(function (id) { ensureTracker(id) })
         const previous = previousRunningRef.current
         if (previous === null) {
-          tasksRef.current.filter(function (task) {
+          boardSnapshot().tasks.filter(function (task) {
             return task.status === 'running' && task.source === 'session' && task.auto !== false
           }).forEach(function (task) {
             if (running[task.sessionId] !== true) finishTracked(task.sessionId)
@@ -643,7 +576,7 @@ window.__ModuleLoader__.load({
         previousRunningRef.current = running
       }, [sessionSignature])
 
-      // Release every retained session when the pane unmounts.
+      // Release every retained session when the controller is disposed.
       useEffect(function () {
         return function () {
           const trackers = trackersRef.current
@@ -651,14 +584,12 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      /** Retain (or reuse) the tracker of one running session. */
       function ensureTracker(id) {
         return createSessionTracker(id, trackersRef.current)
       }
 
-      /** Move one auto card to its terminal lane with measured duration. */
       function finishCard(id, lane) {
-        setTasks(function (previous) {
+        setBoardTasks(function (previous) {
           let changed = false
           const next = previous.map(function (task) {
             if (task.source !== 'session' || task.sessionId !== id || task.auto === false) return task
@@ -674,10 +605,8 @@ window.__ModuleLoader__.load({
           })
           return changed ? next : previous
         })
-        setNow(Date.now())
       }
 
-      /** Resolve the terminal lane of one stopped session and release it. */
       function finishTracked(id) {
         const stillRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
         if (stillRunning) return
@@ -692,12 +621,7 @@ window.__ModuleLoader__.load({
           if (settled || tracker.disposed) return
           settled = true
           const nowRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
-          if (nowRunning) {
-            // A new run started before this stop was classified: keep the
-            // retained session so the new turn's `turn/end` replaces the stale
-            // reason, and let the card stay in Running.
-            return
-          }
+          if (nowRunning) return
           const reason = tracker.reason
           const error = tracker.error
           const failed = (reason !== undefined && reason !== 'completed')
@@ -705,15 +629,13 @@ window.__ModuleLoader__.load({
           finishCard(id, failed ? 'incomplete' : 'done')
           releaseSessionTracker(id, trackersRef.current)
         }
-        // Always give the stream a short beat: the sidebar's `running` flag and
-        // the durable `turn/end` event can arrive in either order, and settling
-        // on the previous turn's reason would pick the wrong lane.
+        // The sidebar's `running` flag and the durable `turn/end` event can
+        // arrive in either order; a short beat avoids reading the previous
+        // turn's reason.
         const settleSoon = function () { window.setTimeout(settle, 400) }
         if (tracker.ready) {
           settleSoon()
         } else {
-          // The initial history page may still be landing when the run stops;
-          // wait for it before scheduling the classification.
           Promise.resolve(tracker.reference.ready).then(settleSoon).catch(function () {
             if (settled || tracker.disposed) return
             settled = true
@@ -723,16 +645,35 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // Keep the window reachable when the viewport changes.
-      useEffect(function () {
-        function onResize() {
-          setGeom(function (current) { return clampGeom(current) })
-        }
-        window.addEventListener('resize', onResize)
-        return function () { window.removeEventListener('resize', onResize) }
-      }, [])
+      return null
+    }
 
-      // Tick only while something is running (the running cards show a live clock).
+    // ------------------------------------------------------------------
+    // Board page (central panel)
+    // ------------------------------------------------------------------
+
+    function TaskBoardPage(props) {
+      const locale = props !== null && props !== undefined && props.locale ? props.locale : moduleLocale
+      const tr = useTranslator(locale)
+      const board = useBoardState()
+      const tasks = board.tasks
+      const syncAvailable = board.syncAvailable
+
+      const [editing, setEditing] = useState(null)
+      const [drag, setDrag] = useState(null)
+      const [drop, setDrop] = useState(null)
+      const [now, setNow] = useState(function () { return Date.now() })
+
+      const tasksRef = useRef(tasks)
+      tasksRef.current = tasks
+      const editingRef = useRef(editing)
+      editingRef.current = editing
+      const dragRef = useRef(drag)
+      dragRef.current = drag
+      const cancelledRef = useRef(false)
+      const laneRefs = useRef({})
+
+      // Live clock for running cards only.
       useEffect(function () {
         const anyRunning = tasks.some(function (task) { return task.status === 'running' })
         if (!anyRunning) return undefined
@@ -740,7 +681,7 @@ window.__ModuleLoader__.load({
         return function () { window.clearInterval(handle) }
       }, [tasks])
 
-      // Escape cancels a card drag or cancels an inline rename.
+      // Escape cancels a card drag or an inline rename.
       useEffect(function () {
         function onKeyDown(event) {
           if (event.key !== 'Escape') return
@@ -758,7 +699,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       // ----------------------------------------------------------------
-      // Pointer gestures
+      // Pointer drag
       // ----------------------------------------------------------------
 
       function beginPointerDrag(event, onMove, onEnd) {
@@ -786,43 +727,7 @@ window.__ModuleLoader__.load({
 
       function isInteractive(node) {
         if (node === null || node === undefined || typeof node.closest !== 'function') return false
-        return node.closest('button, input, select, textarea, a, [data-tm-no-drag]') !== null
-      }
-
-      function onHeaderPointerDown(event) {
-        if (event.button !== 0) return
-        if (isInteractive(event.target)) return
-        const start = geomRef.current
-        const startX = event.clientX
-        const startY = event.clientY
-        beginPointerDrag(event, function (pointerEvent) {
-          setGeom(function () {
-            return clampGeom({
-              left: start.left + (pointerEvent.clientX - startX),
-              top: start.top + (pointerEvent.clientY - startY),
-              width: start.width,
-              height: start.height,
-            })
-          })
-        }, function () {})
-      }
-
-      function startResize(axis) {
-        return function (event) {
-          if (event.button !== 0) return
-          event.stopPropagation()
-          const start = geomRef.current
-          const startX = event.clientX
-          const startY = event.clientY
-          beginPointerDrag(event, function (pointerEvent) {
-            setGeom(function () {
-              const next = { left: start.left, top: start.top, width: start.width, height: start.height }
-              if (axis !== 'y') next.width = Math.max(MIN_WIDTH, start.width + (pointerEvent.clientX - startX))
-              if (axis !== 'x') next.height = Math.max(MIN_HEIGHT, start.height + (pointerEvent.clientY - startY))
-              return clampGeom(next)
-            })
-          }, function () {})
-        }
+        return node.closest('button, input, textarea, select, a') !== null
       }
 
       function laneAtPoint(x, y) {
@@ -914,43 +819,29 @@ window.__ModuleLoader__.load({
       }
 
       // ----------------------------------------------------------------
-      // Board mutations
+      // Board mutations (no task creation: the controller owns that)
       // ----------------------------------------------------------------
-
-      function addTask(title, lane) {
-        const text = String(title || '').trim().slice(0, 200)
-        if (text === '') return
-        const stamp = Date.now()
-        const task = { id: uid(), title: text, status: lane, createdAt: stamp }
-        if (lane === 'running') task.startedAt = stamp
-        if (lane === 'done' || lane === 'incomplete') task.finishedAt = stamp
-        setTasks(function (previous) {
-          const next = previous.concat([task])
-          return next.length > MAX_TASKS ? next.slice(next.length - MAX_TASKS) : next
-        })
-        setNow(stamp)
-      }
 
       function removeTask(id) {
         const task = tasksRef.current.filter(function (item) { return item.id === id })[0]
         if (task !== undefined && task.sessionId) {
-          setIgnored(function (previous) {
+          setBoardIgnored(function (previous) {
             return previous.indexOf(task.sessionId) === -1 ? previous.concat([task.sessionId]) : previous
           })
         }
-        setTasks(function (previous) {
+        setBoardTasks(function (previous) {
           return previous.filter(function (item) { return item.id !== id })
         })
       }
 
       function clearDone() {
-        setTasks(function (previous) {
+        setBoardTasks(function (previous) {
           return previous.filter(function (task) { return task.status !== 'done' })
         })
       }
 
-      function moveTask(id, lane, indexInLane, keepAuto) {
-        setTasks(function (previous) {
+      function moveTask(id, lane, indexInLane) {
+        setBoardTasks(function (previous) {
           const task = previous.filter(function (item) { return item.id === id })[0]
           if (task === undefined) return previous
           const rest = previous.filter(function (item) { return item.id !== id })
@@ -958,7 +849,7 @@ window.__ModuleLoader__.load({
           const next = { ...task, status: lane }
           // A reader's lane change takes the card over from the live sync;
           // reordering inside its own lane keeps it auto-tracked.
-          if (next.sessionId && keepAuto !== true && lane !== task.status) next.auto = false
+          if (next.sessionId && lane !== task.status) next.auto = false
           if (lane === 'queued') {
             next.startedAt = undefined
             next.finishedAt = undefined
@@ -980,7 +871,6 @@ window.__ModuleLoader__.load({
           nextTasks.splice(insertAt, 0, next)
           return nextTasks
         })
-        setNow(Date.now())
       }
 
       function commitEdit(id) {
@@ -990,18 +880,11 @@ window.__ModuleLoader__.load({
         setEditing(null)
         const title = String(current.value || '').trim().slice(0, 200)
         if (title === '') return
-        setTasks(function (previous) {
+        setBoardTasks(function (previous) {
           return previous.map(function (task) {
             return task.id === id ? { ...task, title: title } : task
           })
         })
-      }
-
-      function submitDraft() {
-        const title = draft.trim()
-        if (title === '') return
-        addTask(title, targetLane)
-        setDraft('')
       }
 
       // ----------------------------------------------------------------
@@ -1143,159 +1026,80 @@ window.__ModuleLoader__.load({
         ? tr('subtitle', { total: tasks.length, running: runningCount })
         : tr('subtitleIdle', { total: tasks.length })
 
-      function renderFooter() {
-        return h('div', { key: 'footer', className: 'tm-footer' }, [
-          h('form', {
-            key: 'form',
-            className: 'tm-add',
-            onSubmit: function (event) { event.preventDefault(); submitDraft() },
-          }, [
-            h('input', {
-              key: 'input',
-              className: 'tm-input',
-              type: 'text',
-              value: draft,
-              maxLength: 200,
-              placeholder: tr('addPlaceholder'),
-              'aria-label': tr('addPlaceholder'),
-              onChange: function (event) { setDraft(event.target.value) },
-            }),
-            h('select', {
-              key: 'select',
-              className: 'tm-select',
-              value: targetLane,
-              'aria-label': tr('add'),
-              onChange: function (event) { setTargetLane(event.target.value) },
-            }, LANE_IDS.map(function (lane) {
-              return h('option', { key: lane, value: lane }, tr(LANE_META[lane].key))
-            })),
-            h('button', {
-              key: 'submit',
-              className: 'tm-primary',
-              type: 'submit',
-              disabled: draft.trim() === '',
-            }, tr('add')),
-          ]),
-          doneCount > 0
-            ? h('button', {
-                key: 'clear',
-                type: 'button',
-                className: 'tm-link',
-                onClick: clearDone,
-              }, tr('clearFinished'))
-            : null,
-          h('span', {
-            key: 'sync',
-            className: 'tm-sync' + (autoSync ? ' tm-sync--on' : ' tm-sync--off'),
-            title: autoSync ? tr('syncHint') : tr('syncOff'),
-            'aria-label': autoSync ? tr('syncOn') : tr('syncOff'),
-          }, h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true })),
-        ])
-      }
-
-      // The right-sidebar tab body: no window chrome, no geometry, no
-      // collapse/close — the native pane owns all of that. The lanes reflow to
-      // two columns (or one) so the same board works in a narrow sidebar.
-      if (docked) {
-        return h(React.Fragment, null,
-          h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
-          h('div', { key: 'dock', className: 'tm-root tm-dock', 'data-tm-dock': '' }, [
-            h('div', { key: 'head', className: 'tm-dock-head' }, [
-              h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
-              h('div', { key: 'titles', className: 'tm-titles' }, [
-                h('div', { key: 'title', className: 'tm-title' }, tr('title')),
-                h('div', { key: 'sub', className: 'tm-subtitle', title: tr('hint') }, subtitleText),
-              ]),
-            ]),
-            h('div', { key: 'body', className: 'tm-body tm-dock-body' }, LANE_IDS.map(renderLane)),
-            renderFooter(),
-          ]),
-        )
-      }
-
-      if (hidden) {
-        return h(React.Fragment, null,
-          h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
-          h('button', {
-            key: 'pill',
-            type: 'button',
-            className: 'tm-root tm-pill',
-            style: { left: geom.left, top: geom.top },
-            title: tr('reopen'),
-            'aria-label': tr('reopen'),
-            onClick: function () { setHidden(false) },
-          }, [
-            h('span', { key: 'dot', className: 'tm-pill-dot', 'aria-hidden': true }),
-            h('span', { key: 'text', className: 'tm-pill-text' }, tr('reopen')),
-            h('span', { key: 'count', className: 'tm-pill-count' }, String(tasks.length)),
-          ]),
-        )
-      }
-
-      const header = h('div', {
-        key: 'header',
-        className: 'tm-header',
-        onPointerDown: onHeaderPointerDown,
-      }, [
-        h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
-        h('div', { key: 'titles', className: 'tm-titles' }, [
-          h('div', { key: 'title', className: 'tm-title' }, tr('title')),
-          h('div', { key: 'sub', className: 'tm-subtitle', title: tr('hint') }, subtitleText),
-        ]),
-        h('div', { key: 'actions', className: 'tm-actions', 'data-tm-no-drag': '' }, [
-          h('button', {
-            key: 'collapse',
-            type: 'button',
-            className: 'tm-icon',
-            'aria-label': collapsed ? tr('expand') : tr('collapse'),
-            title: collapsed ? tr('expand') : tr('collapse'),
-            onClick: function () { setCollapsed(function (value) { return !value }) },
-          }, collapsed ? h(IconExpand) : h(IconCollapse)),
-          h('button', {
-            key: 'close',
-            type: 'button',
-            className: 'tm-icon',
-            'aria-label': tr('close'),
-            title: tr('close'),
-            onClick: function () { setHidden(true) },
-          }, h(IconClose)),
-        ]),
-      ])
-
-      const handles = collapsed ? null : [
-        h('div', { key: 'r', className: 'tm-resize tm-resize--r', 'aria-hidden': true, onPointerDown: startResize('x') }),
-        h('div', { key: 'b', className: 'tm-resize tm-resize--b', 'aria-hidden': true, onPointerDown: startResize('y') }),
-        h('div', { key: 'c', className: 'tm-resize tm-resize--c', 'aria-hidden': true, onPointerDown: startResize('both') }),
-      ]
-
       const ghost = drag === null ? null : h('div', {
         key: 'ghost',
         className: 'tm-ghost',
         'aria-hidden': true,
         style: {
-          left: Math.min(drag.x + 14, viewportSize().width - 260),
+          left: Math.min(drag.x + 14, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 260),
           top: drag.y - 20,
           width: Math.min(Math.max(170, drag.width - 6), 260),
         },
       }, h('span', { key: 'title', className: 'tm-ghost-title' }, drag.title))
 
-      const panelStyle = collapsed
-        ? { left: geom.left, top: geom.top, width: Math.min(geom.width, 430), height: 46 }
-        : { left: geom.left, top: geom.top, width: geom.width, height: geom.height }
-
       return h(React.Fragment, null,
         h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', {
-          key: 'panel',
-          className: 'tm-root tm-panel' + (collapsed ? ' tm-panel--collapsed' : ''),
-          style: panelStyle,
-          role: 'dialog',
-          'aria-label': tr('title'),
-          'data-tm-panel': '',
-        }, collapsed
-          ? [header]
-          : [header, h('div', { key: 'body', className: 'tm-body' }, LANE_IDS.map(renderLane)), renderFooter(), handles]),
+        h('div', { key: 'page', className: 'tm-root tm-page', 'data-tm-page': '', 'aria-label': tr('title') }, [
+          h('div', { key: 'head', className: 'tm-page-head' }, [
+            h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
+            h('div', { key: 'titles', className: 'tm-titles' }, [
+              h('div', { key: 'title', className: 'tm-title' }, tr('title')),
+              h('div', { key: 'sub', className: 'tm-subtitle' }, subtitleText),
+            ]),
+            h('span', {
+              key: 'sync',
+              className: 'tm-sync' + (syncAvailable ? ' tm-sync--on' : ' tm-sync--off'),
+              title: syncAvailable ? tr('syncHint') : tr('syncOff'),
+              'aria-label': syncAvailable ? tr('syncOn') : tr('syncOff'),
+            }, [
+              h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true }),
+              h('span', { key: 'label', className: 'tm-sync-label' }, syncAvailable ? tr('syncOn') : tr('syncOff')),
+            ]),
+          ]),
+          h('div', { key: 'body', className: 'tm-page-body' }, LANE_IDS.map(renderLane)),
+          h('div', { key: 'foot', className: 'tm-page-foot' }, [
+            h('span', { key: 'hint', className: 'tm-foot-hint', title: tr('syncHint') }, tr('pageHint')),
+            doneCount > 0
+              ? h('button', {
+                  key: 'clear',
+                  type: 'button',
+                  className: 'tm-link',
+                  onClick: clearDone,
+                }, tr('clearFinished'))
+              : null,
+          ]),
+        ]),
         ghost,
+      )
+    }
+
+    // ------------------------------------------------------------------
+    // Retired right-sidebar tab: a short migration notice instead of a dead
+    // tab left over from the previous placement.
+    // ------------------------------------------------------------------
+
+    function MigrationBody(props) {
+      const locale = props !== null && props !== undefined && props.locale ? props.locale : moduleLocale
+      const tr = useTranslator(locale)
+      function openBoard() {
+        try {
+          const layout = moduleCtx !== undefined && moduleCtx !== null && typeof moduleCtx.get === 'function'
+            ? moduleCtx.get('layout')
+            : undefined
+          if (layout !== null && layout !== undefined && typeof layout.selectPanel === 'function') {
+            layout.selectPanel(PANEL_ID)
+          }
+        } catch (error) {
+          // The notice stays readable even when navigation is unavailable.
+        }
+      }
+      return h(React.Fragment, null,
+        h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
+        h('div', { key: 'migrate', className: 'tm-root tm-migrate' }, [
+          h('div', { key: 'title', className: 'tm-migrate-title' }, tr('movedTitle')),
+          h('div', { key: 'text', className: 'tm-migrate-text' }, tr('movedBody')),
+          h('button', { key: 'open', type: 'button', className: 'tm-primary', onClick: openBoard }, tr('movedOpen')),
+        ]),
       )
     }
 
@@ -1306,31 +1110,25 @@ window.__ModuleLoader__.load({
     const CSS = [
       '.tm-root, .tm-root * { box-sizing: border-box; }',
       '.tm-root { font-family: inherit; color: var(--dsw-alias-label-primary); }',
-      '.tm-panel { position: fixed; display: flex; flex-direction: column; min-width: 0; min-height: 0;',
-      '  pointer-events: auto; overflow: hidden; font-size: 12.5px; line-height: 1.42;',
-      '  background: var(--dsw-alias-bg-overlay); border: 1px solid var(--dsw-alias-border-l1);',
-      '  border-radius: 12px; box-shadow: 0 18px 52px rgba(0, 0, 0, 0.32), 0 1px 0 rgba(255, 255, 255, 0.04) inset; }',
-      '.tm-header { flex: 0 0 44px; height: 44px; display: flex; align-items: center; gap: 10px;',
-      '  padding: 0 8px 0 14px; cursor: grab; user-select: none; touch-action: none;',
-      '  border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); }',
-      '.tm-panel--collapsed .tm-header { border-bottom: 0; }',
-      '.tm-header:active { cursor: grabbing; }',
+      '.tm-page { display: flex; flex-direction: column; gap: 10px; width: 100%; height: 100%; min-height: 0;',
+      '  padding: 14px 16px 12px; font-size: 12.5px; line-height: 1.42; background: transparent; }',
+      '.tm-page-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }',
       '.tm-pulse { position: relative; width: 8px; height: 8px; border-radius: 999px; flex: 0 0 auto;',
       '  background: var(--dsw-alias-brand-primary); }',
       '.tm-pulse::after { content: ""; position: absolute; inset: -4px; border-radius: 999px;',
       '  border: 1px solid var(--dsw-alias-brand-primary); opacity: 0.6; animation: tm-ping 2.6s ease-out infinite; }',
       '@keyframes tm-ping { 0% { transform: scale(0.55); opacity: 0.55; } 70%, 100% { transform: scale(1.35); opacity: 0; } }',
       '.tm-titles { min-width: 0; display: flex; flex-direction: column; gap: 1px; }',
-      '.tm-title { font-size: 12.5px; font-weight: 600; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.tm-subtitle { font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.tm-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }',
-      '.tm-icon { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0;',
-      '  border-radius: 7px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }',
-      '.tm-icon:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }',
-      '.tm-icon:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }',
-      '.tm-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px; }',
-      '.tm-lane { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding: 6px;',
-      '  background: var(--dsw-alias-bg-base); border: 1px solid transparent; border-radius: 9px; transition: border-color 120ms ease; }',
+      '.tm-title { font-size: 13.5px; font-weight: 600; letter-spacing: 0.01em; }',
+      '.tm-subtitle { font-size: 11px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-sync { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }',
+      '.tm-sync-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--dsw-alias-state-success-primary); }',
+      '.tm-sync--off .tm-sync-dot { background: var(--dsw-alias-label-secondary); opacity: 0.6; }',
+      '.tm-sync-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-page-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }',
+      '.tm-lane { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding: 8px;',
+      '  background: var(--dsw-alias-bg-layer-1); border: 1px solid transparent; border-radius: 10px;',
+      '  transition: border-color 120ms ease; }',
       '.tm-lane--over { border-color: var(--dsw-alias-brand-primary); }',
       '.tm-lane-head { display: flex; align-items: center; gap: 6px; padding: 1px 3px 0; flex: 0 0 auto; }',
       '.tm-dot { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; }',
@@ -1345,7 +1143,7 @@ window.__ModuleLoader__.load({
       '.tm-list::-webkit-scrollbar-thumb { background: var(--dsw-alias-border-l2); border-radius: 8px; }',
       '.tm-list::-webkit-scrollbar-track { background: transparent; }',
       '.tm-card { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 8px 7px 8px 11px;',
-      '  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px;',
+      '  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px;',
       '  cursor: grab; user-select: none; touch-action: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);',
       '  transition: border-color 120ms ease, opacity 120ms ease; }',
       '.tm-card::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2.5px;',
@@ -1359,76 +1157,43 @@ window.__ModuleLoader__.load({
       '  font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }',
       '.tm-meta-text { min-width: 0; }',
       '.tm-tag { display: inline-flex; align-items: center; height: 14px; padding: 0 4px; border-radius: 4px;',
-      '  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);',
+      '  background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary);',
       '  font-size: 9.5px; line-height: 1; white-space: nowrap; }',
       '.tm-card-meta--running { color: var(--dsw-alias-brand-primary); }',
       '.tm-remove { width: 20px; height: 20px; flex: 0 0 auto; opacity: 0; transition: opacity 120ms ease; }',
       '.tm-card:hover .tm-remove, .tm-card:focus-within .tm-remove { opacity: 1; }',
+      '.tm-icon { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0;',
+      '  border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }',
+      '.tm-icon:hover { background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }',
+      '.tm-icon:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }',
       '.tm-edit { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 12px; color: var(--dsw-alias-label-primary);',
-      '  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-brand-primary);',
+      '  background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-brand-primary);',
       '  border-radius: 5px; padding: 1px 5px; outline: none; }',
       '.tm-drop { flex: 0 0 auto; height: 2px; margin: 1px 2px; border-radius: 2px;',
       '  background: var(--dsw-alias-brand-primary); opacity: 0.9; box-shadow: 0 0 8px var(--dsw-alias-brand-primary); }',
       '.tm-empty { margin: auto 0; padding: 14px 0; text-align: center; font-size: 11px;',
       '  color: var(--dsw-alias-label-secondary); opacity: 0.7; }',
-      '.tm-footer { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 9px 10px;',
-      '  border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); }',
-      '.tm-add { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; margin: 0; }',
-      '.tm-input { flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 9px; border-radius: 7px;',
-      '  border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base);',
-      '  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; outline: none; }',
-      '.tm-input::placeholder { color: var(--dsw-alias-label-secondary); opacity: 0.75; }',
-      '.tm-input:focus { border-color: var(--dsw-alias-brand-primary); }',
-      '.tm-select { height: 30px; max-width: 98px; padding: 0 6px; border-radius: 7px;',
-      '  border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base);',
-      '  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11.5px; outline: none; cursor: pointer; }',
-      '.tm-select:focus { border-color: var(--dsw-alias-brand-primary); }',
+      '.tm-page-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;',
+      '  padding-top: 8px; border-top: 1px solid var(--dsw-alias-border-l1); }',
+      '.tm-foot-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-link { margin-left: auto; border: 0; background: transparent; color: var(--dsw-alias-label-secondary);',
+      '  font: inherit; font-size: 11px; padding: 4px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }',
+      '.tm-link:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }',
       '.tm-primary { height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--dsw-alias-brand-primary);',
       '  background: transparent; color: var(--dsw-alias-brand-primary); font: inherit; font-size: 12px;',
       '  font-weight: 600; cursor: pointer; }',
       '.tm-primary:hover { background: var(--dsw-alias-bg-layer-2); }',
-      '.tm-primary:disabled { opacity: 0.45; cursor: default; background: transparent; }',
-      '.tm-link { border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit;',
-      '  font-size: 11px; padding: 4px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }',
-      '.tm-link:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }',
-      '.tm-sync { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;',
-      '  flex: 0 0 auto; }',
-      '.tm-sync-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--dsw-alias-state-success-primary); }',
-      '.tm-sync--off .tm-sync-dot { background: var(--dsw-alias-label-secondary); opacity: 0.6; }',
-      '.tm-resize { position: absolute; z-index: 3; }',
-      '.tm-resize--r { top: 8px; right: 0; bottom: 12px; width: 6px; cursor: ew-resize; }',
-      '.tm-resize--b { left: 8px; right: 14px; bottom: 0; height: 6px; cursor: ns-resize; }',
-      '.tm-resize--c { right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; }',
-      '.tm-resize--c::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 7px; height: 7px;',
-      '  border-right: 1.5px solid var(--dsw-alias-border-l2); border-bottom: 1.5px solid var(--dsw-alias-border-l2);',
-      '  border-radius: 0 0 2px 0; }',
       '.tm-ghost { position: fixed; z-index: 2147483000; pointer-events: none; display: flex; align-items: center;',
       '  padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-overlay);',
       '  border: 1px solid var(--dsw-alias-brand-primary); box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);',
       '  transform: rotate(1.2deg); opacity: 0.96; font-size: 12px; color: var(--dsw-alias-label-primary); }',
       '.tm-ghost-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }',
-      '.tm-pill { position: fixed; z-index: 2147482999; display: flex; align-items: center; gap: 8px; height: 34px;',
-      '  padding: 0 12px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l1);',
-      '  background: var(--dsw-alias-bg-overlay); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px;',
-      '  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28); cursor: pointer; pointer-events: auto; max-width: 220px; }',
-      '.tm-pill:hover { border-color: var(--dsw-alias-border-l2); }',
-      '.tm-pill-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--dsw-alias-brand-primary); flex: 0 0 auto; }',
-      '.tm-pill-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-      '.tm-pill-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; display: grid;',
-      '  place-items: center; font-size: 10.5px; color: var(--dsw-alias-label-secondary);',
-      '  background: var(--dsw-alias-bg-layer-2); font-variant-numeric: tabular-nums; }',
-      '@media (max-width: 760px) { .tm-body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); } }',
+      '.tm-migrate { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;',
+      '  gap: 10px; padding: 24px; text-align: center; }',
+      '.tm-migrate-title { font-size: 13px; font-weight: 600; }',
+      '.tm-migrate-text { font-size: 12px; color: var(--dsw-alias-label-secondary); max-width: 260px; }',
+      '@media (max-width: 980px) { .tm-page-body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); } }',
       '@media (prefers-reduced-motion: reduce) { .tm-pulse::after { animation: none; opacity: 0; } }',
-      // Native right-sidebar tab body: the pane owns the chrome, so the board
-      // drops the window frame and reflows its lanes to the pane width.
-      '.tm-dock { position: relative; width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column;',
-      '  background: transparent; pointer-events: auto; font-size: 12.5px; line-height: 1.42; }',
-      '.tm-dock-head { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; min-width: 0;',
-      '  padding: 9px 10px 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); }',
-      '.tm-dock-body { flex: 1 1 auto; min-height: 0; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));',
-      '  grid-auto-rows: minmax(0, 1fr); gap: 8px; padding: 8px 10px; overflow: hidden; }',
-      '.tm-dock-body .tm-lane { background: var(--dsw-alias-bg-base); }',
-      '.tm-dock .tm-footer { background: transparent; flex-wrap: wrap; row-gap: 6px; }',
     ].join('\n')
 
     // ------------------------------------------------------------------
@@ -1445,138 +1210,38 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The native tab's title, localized at call time. */
-    function dockTitle() {
-      return translate(dictFor(activeLocaleOf(moduleLocale)), 'title')
-    }
-
-    /** The native guide row's description, localized at call time. */
-    function dockDescription() {
-      return translate(dictFor(activeLocaleOf(moduleLocale)), 'dockDescription')
-    }
-
-    /** The guide row's glyph: a small board with three status columns. */
-    function IconBoard(iconProps) {
-      const size = iconProps !== null && iconProps !== undefined && typeof iconProps.size === 'number' ? iconProps.size : 16
-      return h('svg', {
-        viewBox: '0 0 16 16',
-        width: size,
-        height: size,
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 1.3,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': true,
-        focusable: false,
-      }, [
-        h('rect', { key: 'frame', x: 1.8, y: 2.2, width: 12.4, height: 11.6, rx: 2.2 }),
-        h('path', { key: 'cols', d: 'M5.6 5.2v5.6M8 5.2v3.4M10.4 5.2v2.2' }),
-      ])
-    }
-
-    const AUTO_OPEN_KEY = 'dsh.task-monitor.dock-open.v2'
-
-    /** Open the tab in the right sidebar once per browser. */
-    function autoOpenDockTab(ctx) {
+    /** Keep the retired right-sidebar tab informative instead of dead. */
+    function registerMigrationTab(ctx) {
+      let tabs
+      try { tabs = ctx.get('sidebarRightTabs') } catch (error) { tabs = undefined }
+      if (tabs === null || tabs === undefined || typeof tabs.register !== 'function') return function () {}
+      let offType
       try {
-        if (typeof window === 'undefined' || !window.localStorage) return
-        if (window.localStorage.getItem(AUTO_OPEN_KEY) === '1') return
-      } catch (error) {
-        return
-      }
-      let tries = 0
-      const isOpen = function (right) {
-        try {
-          const source = right !== null && right !== undefined ? right.openTabs : undefined
-          const rows = source !== undefined && source !== null && typeof source.getSnapshot === 'function'
-            ? source.getSnapshot()
-            : undefined
-          if (!Array.isArray(rows)) return false
-          return rows.some(function (row) {
-            return row !== null && row !== undefined && row.kind === 'task-monitor'
-          })
-        } catch (error) {
-          return false
-        }
-      }
-      const attempt = function () {
-        tries += 1
-        let opened = false
-        try {
-          const right = ctx.get('sidebarRight')
-          if (right !== null && right !== undefined && typeof right.openTab === 'function') {
-            if (!isOpen(right)) right.openTab('task-monitor')
-            opened = isOpen(right)
-          }
-        } catch (error) {
-          opened = false
-        }
-        if (opened) {
-          try { window.localStorage.setItem(AUTO_OPEN_KEY, '1') } catch (error) { /* ignore */ }
-          return
-        }
-        if (tries < 3) window.setTimeout(attempt, 900)
-      }
-      window.setTimeout(attempt, 900)
-    }
-
-    /**
-     * Register the native right-sidebar tab: its type + guide capsule in the
-     * host's `sidebarRightTabs` registry, and the body in the keyed
-     * `sidebar.right.pane.tab` seat. Null when the host refuses the type (for
-     * example a stale id after a reload), so the caller can fall back.
-     */
-    function registerDockTab(ctx, tabs) {
-      const disposers = []
-      const disposeAll = function () {
-        for (let index = disposers.length - 1; index >= 0; index -= 1) {
-          try { disposers[index]() } catch (error) { /* release best effort */ }
-        }
-        disposers.length = 0
-      }
-      try {
-        disposers.push(tabs.register({
-          id: 'task-monitor',
-          kind: 'task-monitor',
-          keepMounted: true,
-          title: function () { return dockTitle() },
-          guide: [{
-            id: 'task-monitor',
-            order: 30,
-            title: function () { return dockTitle() },
-            description: function () { return dockDescription() },
-            icon: IconBoard,
-          }],
-        }))
-        disposers.push(ctx.slots.inject('sidebar.right.pane.tab', function () {
-          return ctx.slots.register({
-            name: 'sidebar.right.pane.tab',
-            key: 'task-monitor',
-            inject: function () { return { locale: moduleLocale, mode: 'dock' } },
-          }, TaskMonitorPanel)
-        }))
-      } catch (error) {
-        disposeAll()
-        return null
-      }
-      return disposeAll
-    }
-
-    /** Fallback floating window when the native right sidebar is unavailable. */
-    function registerOverlay(ctx) {
-      try {
-        return ctx.slots.inject('shell.overlay', function () {
-          return ctx.slots.register({
-            name: 'shell.overlay',
-            id: 'task-monitor',
-            order: 40,
-            label: dockTitle,
-            inject: function () { return { locale: moduleLocale } },
-          }, TaskMonitorPanel)
+        offType = tabs.register({
+          id: PANEL_ID,
+          kind: PANEL_ID,
+          keepMounted: false,
+          title: function () { return panelTitle() },
         })
       } catch (error) {
         return function () {}
+      }
+      let offBody = function () {}
+      try {
+        offBody = ctx.slots.inject('sidebar.right.pane.tab', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.pane.tab',
+            key: PANEL_ID,
+            inject: function () { return { locale: moduleLocale } },
+          }, MigrationBody)
+        })
+      } catch (error) {
+        try { offType() } catch (ignored) { /* ignore */ }
+        return function () {}
+      }
+      return function () {
+        try { offBody() } catch (error) { /* ignore */ }
+        try { offType() } catch (error) { /* ignore */ }
       }
     }
 
@@ -1597,59 +1262,45 @@ window.__ModuleLoader__.load({
                 try { if (typeof offEn === 'function') offEn() } catch (error) { /* ignore */ }
               }
             } catch (error) {
-              // An older locale service without this register shape: the panel's
-              // own dictionaries still resolve from the browser language.
+              // The panel's own dictionaries still resolve from the browser language.
             }
           }
           return dispose
         }, 'task-monitor: dictionaries')
 
-        // Prefer the native right-sidebar tab; fall back to the floating
-        // window only when the host never provides its tab registry (for
-        // example a deployment without the right sidebar pane).
+        // Left sidebar entry: the sidebar owns the button and selects the
+        // matching `main` panel by this id.
+        ctx.slots.inject('sidebar.panellist', function () {
+          return ctx.slots.register({
+            name: 'sidebar.panellist',
+            id: PANEL_ID,
+            order: 30,
+            label: panelTitle,
+          }, PanelIcon)
+        })
+
+        // The board page.
+        ctx.slots.inject('main', function () {
+          return ctx.slots.register({
+            name: 'main',
+            key: PANEL_ID,
+            inject: function () { return { locale: moduleLocale } },
+          }, TaskBoardPage)
+        })
+
+        // The always-mounted controller: collects sessions even while the
+        // panel is closed, so the board is current when the reader opens it.
+        ctx.slots.inject('shell.overlay', function () {
+          return ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'task-monitor-controller',
+            order: 45,
+          }, MonitorController)
+        })
+
         ctx.effect(function () {
-          let stopped = false
-          let timer = 0
-          let attempts = 0
-          let disposeDock = null
-          let disposeOverlay = null
-          const install = function () {
-            if (stopped) return
-            let tabs
-            try { tabs = ctx.get('sidebarRightTabs') } catch (error) { tabs = undefined }
-            if (tabs !== null && tabs !== undefined && typeof tabs.register === 'function') {
-              const dispose = registerDockTab(ctx, tabs)
-              if (dispose !== null) {
-                disposeDock = dispose
-                if (disposeOverlay !== null) {
-                  const off = disposeOverlay
-                  disposeOverlay = null
-                  try { off() } catch (error) { /* ignore */ }
-                }
-                autoOpenDockTab(ctx)
-                return
-              }
-            }
-            attempts += 1
-            if (attempts === 6 && disposeOverlay === null) disposeOverlay = registerOverlay(ctx)
-            if (attempts < 20) timer = window.setTimeout(install, 500)
-          }
-          install()
-          return function () {
-            stopped = true
-            try { window.clearTimeout(timer) } catch (error) { /* ignore */ }
-            if (disposeDock !== null) {
-              const off = disposeDock
-              disposeDock = null
-              try { off() } catch (error) { /* ignore */ }
-            }
-            if (disposeOverlay !== null) {
-              const off = disposeOverlay
-              disposeOverlay = null
-              try { off() } catch (error) { /* ignore */ }
-            }
-          }
-        }, 'task-monitor: native sidebar tab')
+          return registerMigrationTab(ctx)
+        }, 'task-monitor: retired right-sidebar tab')
       },
     }
   },

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Task Monitor",
-    "description": "A task board docked in the right side panel: running sessions are collected automatically and move to Finished when they stop; cards can be dragged between Queued, Running, Finished and Incomplete."
+    "description": "A left-sidebar task board: running sessions are collected automatically, a normal finish moves the card to Finished, an error or interruption to Incomplete. Cards can be dragged between lanes; there is no manual add form."
   }
 }

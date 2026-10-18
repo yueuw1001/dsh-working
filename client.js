@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useRef, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** Locale namespace of the plugin's own runtime copy. */
     const NS = 'taskMonitor'
@@ -61,6 +61,10 @@ window.__ModuleLoader__.load({
       stoppedMeta: 'Stopped {time}',
       tookMeta: '· took {time}',
       hint: 'Drag cards between lanes; double-click a title to rename',
+      sessionTag: 'Session',
+      syncOn: 'Auto-sync on',
+      syncOff: 'Auto-sync unavailable',
+      syncHint: 'Running sidebar sessions appear in Running; when a session stops, its card moves to Finished',
     }
 
     const zh = {
@@ -87,6 +91,10 @@ window.__ModuleLoader__.load({
       stoppedMeta: '停止于 {time}',
       tookMeta: '· 用时 {time}',
       hint: '拖动卡片切换状态；双击标题可重命名',
+      sessionTag: '会话',
+      syncOn: '自动同步',
+      syncOff: '自动同步不可用',
+      syncHint: '侧边栏中正在运行的会话会自动出现在「运行中」，会话停止后自动移到「已结束」',
     }
 
     const DICTS = { en: en, zh: zh }
@@ -241,6 +249,9 @@ window.__ModuleLoader__.load({
           geom: isGeom(data.geom) ? data.geom : null,
           collapsed: data.collapsed === true,
           hidden: data.hidden === true,
+          ignored: Array.isArray(data.ignored)
+            ? data.ignored.filter(function (id) { return typeof id === 'string' }).slice(0, 200)
+            : [],
         }
       } catch (error) {
         return null
@@ -254,6 +265,83 @@ window.__ModuleLoader__.load({
       } catch (error) {
         // Storage may be unavailable or full; the board still works in memory.
       }
+    }
+
+    /**
+     * Reconcile the auto-tracked session cards with the live sidebar rows.
+     *
+     * A session that starts running gains a card in the Running lane; when it
+     * stops, that card moves to Finished with its measured duration. Only cards
+     * this module created (`source: 'session'`, `auto !== false`) are touched:
+     * a card the reader dragged to another lane is handed over to manual
+     * control, and a card the reader deleted stays suppressed until the session
+     * next starts a run (see the `ignored` list).
+     *
+     * @param tasks - current board.
+     * @param rows - `{ id, title, running }` rows for the sidebar sessions.
+     * @param ignored - session ids whose card the reader deleted while running.
+     * @returns the same array when nothing changed, a new array otherwise.
+     */
+    function syncSessionCards(tasks, rows, ignored) {
+      let changed = false
+      const next = tasks.slice()
+      const findAuto = function (sessionId) {
+        for (let index = 0; index < next.length; index += 1) {
+          const task = next[index]
+          if (task.source === 'session' && task.sessionId === sessionId && task.auto !== false) return index
+        }
+        return -1
+      }
+      rows.forEach(function (row) {
+        const index = findAuto(row.id)
+        const stamp = Date.now()
+        if (row.running) {
+          if (index === -1) {
+            if (ignored.indexOf(row.id) !== -1) return
+            next.push({
+              id: uid(),
+              title: row.title,
+              status: 'running',
+              createdAt: stamp,
+              startedAt: stamp,
+              source: 'session',
+              sessionId: row.id,
+              auto: true,
+            })
+            changed = true
+            return
+          }
+          const card = next[index]
+          let updated = card
+          if (card.status !== 'running') {
+            updated = { ...updated, status: 'running', startedAt: stamp, finishedAt: undefined, durationMs: undefined }
+          }
+          if (updated.title !== row.title) updated = { ...updated, title: row.title }
+          if (updated !== card) {
+            next[index] = updated
+            changed = true
+          }
+          return
+        }
+        if (index === -1) return
+        const card = next[index]
+        if (card.status !== 'running') {
+          if (card.title !== row.title) {
+            next[index] = { ...card, title: row.title }
+            changed = true
+          }
+          return
+        }
+        next[index] = {
+          ...card,
+          title: row.title,
+          status: 'done',
+          finishedAt: stamp,
+          durationMs: typeof card.startedAt === 'number' ? stamp - card.startedAt : undefined,
+        }
+        changed = true
+      })
+      return changed ? next : tasks
     }
 
     // ------------------------------------------------------------------
@@ -330,6 +418,9 @@ window.__ModuleLoader__.load({
       const [hidden, setHidden] = useState(function () {
         return boot !== null && boot.hidden === true
       })
+      const [ignored, setIgnored] = useState(function () {
+        return boot !== null && Array.isArray(boot.ignored) ? boot.ignored : []
+      })
       const [draft, setDraft] = useState('')
       const [targetLane, setTargetLane] = useState('queued')
       const [editing, setEditing] = useState(null)
@@ -343,6 +434,8 @@ window.__ModuleLoader__.load({
       tasksRef.current = tasks
       const editingRef = useRef(editing)
       editingRef.current = editing
+      const ignoredRef = useRef(ignored)
+      ignoredRef.current = ignored
       const dragRef = useRef(drag)
       dragRef.current = drag
       const cancelledRef = useRef(false)
@@ -350,8 +443,70 @@ window.__ModuleLoader__.load({
 
       // Persist the board and the window geometry on every committed change.
       useEffect(function () {
-        writeStored({ tasks: tasks, geom: geom, collapsed: collapsed, hidden: hidden })
-      }, [tasks, geom, collapsed, hidden])
+        writeStored({ tasks: tasks, geom: geom, collapsed: collapsed, hidden: hidden, ignored: ignored })
+      }, [tasks, geom, collapsed, hidden, ignored])
+
+      // ----------------------------------------------------------------
+      // Live sync with the sidebar's sessions
+      // ----------------------------------------------------------------
+      //
+      // Every slot entry receives the standard session hooks: `useSessions`
+      // selects from the session list (ids + byId), and `useSessionStatus`
+      // selects from the per-session status Map (`running`, pendingInteraction,
+      // completionUnread). They are optional so the panel still works where a
+      // slot omits them; the object identities only change when the snapshot
+      // changes, which keeps the reconciliation cheap.
+      const autoSync = typeof props !== 'undefined' && props !== null
+        && typeof props.useSessions === 'function'
+        && typeof props.useSessionStatus === 'function'
+      const sessionsState = autoSync
+        ? props.useSessions(function (state) { return state })
+        : undefined
+      const statusState = autoSync
+        ? props.useSessionStatus(function (state) { return state })
+        : undefined
+      const sessionRows = useMemo(function () {
+        if (!autoSync) return []
+        const byId = (sessionsState !== null && sessionsState !== undefined && sessionsState.byId) || {}
+        const listed = sessionsState !== null && sessionsState !== undefined && Array.isArray(sessionsState.ids)
+          ? sessionsState.ids
+          : []
+        const ids = listed.length > 0 ? listed : Object.keys(byId)
+        const rows = []
+        ids.forEach(function (id) {
+          if (typeof id !== 'string' || id === '') return
+          const view = byId[id] || {}
+          const status = statusState !== null && statusState !== undefined && typeof statusState.get === 'function'
+            ? statusState.get(id)
+            : undefined
+          const running = !!(view.running || (status !== null && status !== undefined && status.running))
+          rows.push({
+            id: id,
+            title: String(view.displayTitle || view.title || view.name || id),
+            running: running,
+          })
+        })
+        return rows
+      }, [autoSync, sessionsState, statusState])
+      const sessionSignature = useMemo(function () {
+        return sessionRows.map(function (row) {
+          return row.id + (row.running ? '+' : '-') + ':' + row.title
+        }).join('|')
+      }, [sessionRows])
+      const rowsRef = useRef(sessionRows)
+      rowsRef.current = sessionRows
+
+      useEffect(function () {
+        const rows = rowsRef.current
+        if (rows.length === 0) return
+        setTasks(function (previous) { return syncSessionCards(previous, rows, ignoredRef.current) })
+        const runningIds = {}
+        rows.forEach(function (row) { if (row.running) runningIds[row.id] = true })
+        setIgnored(function (previous) {
+          const next = previous.filter(function (id) { return runningIds[id] === true })
+          return next.length === previous.length ? previous : next
+        })
+      }, [sessionSignature])
 
       // Keep the window reachable when the viewport changes.
       useEffect(function () {
@@ -562,8 +717,14 @@ window.__ModuleLoader__.load({
       }
 
       function removeTask(id) {
+        const task = tasksRef.current.filter(function (item) { return item.id === id })[0]
+        if (task !== undefined && task.sessionId) {
+          setIgnored(function (previous) {
+            return previous.indexOf(task.sessionId) === -1 ? previous.concat([task.sessionId]) : previous
+          })
+        }
         setTasks(function (previous) {
-          return previous.filter(function (task) { return task.id !== id })
+          return previous.filter(function (item) { return item.id !== id })
         })
       }
 
@@ -573,13 +734,16 @@ window.__ModuleLoader__.load({
         })
       }
 
-      function moveTask(id, lane, indexInLane) {
+      function moveTask(id, lane, indexInLane, keepAuto) {
         setTasks(function (previous) {
           const task = previous.filter(function (item) { return item.id === id })[0]
           if (task === undefined) return previous
           const rest = previous.filter(function (item) { return item.id !== id })
           const stamp = Date.now()
           const next = { ...task, status: lane }
+          // A reader's lane change takes the card over from the live sync;
+          // reordering inside its own lane keeps it auto-tracked.
+          if (next.sessionId && keepAuto !== true && lane !== task.status) next.auto = false
           if (lane === 'queued') {
             next.startedAt = undefined
             next.finishedAt = undefined
@@ -705,7 +869,12 @@ window.__ModuleLoader__.load({
           h('div', {
             key: 'meta',
             className: 'tm-card-meta' + (task.status === 'running' ? ' tm-card-meta--running' : ''),
-          }, cardMeta(task)),
+          }, [
+            task.sessionId
+              ? h('span', { key: 'tag', className: 'tm-tag', title: tr('syncHint') }, tr('sessionTag'))
+              : null,
+            h('span', { key: 'text', className: 'tm-meta-text' }, cardMeta(task)),
+          ]),
         ])
       }
 
@@ -845,6 +1014,12 @@ window.__ModuleLoader__.load({
               onClick: clearDone,
             }, tr('clearFinished'))
           : null,
+        h('span', {
+          key: 'sync',
+          className: 'tm-sync' + (autoSync ? ' tm-sync--on' : ' tm-sync--off'),
+          title: autoSync ? tr('syncHint') : tr('syncOff'),
+          'aria-label': autoSync ? tr('syncOn') : tr('syncOff'),
+        }, h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true })),
       ])
 
       const handles = collapsed ? null : [
@@ -940,7 +1115,12 @@ window.__ModuleLoader__.load({
       '.tm-card--dragging { opacity: 0.34; }',
       '.tm-card-top { display: flex; align-items: flex-start; gap: 4px; }',
       '.tm-card-title { flex: 1 1 auto; min-width: 0; font-size: 12px; padding-left: 2px; word-break: break-word; white-space: pre-wrap; }',
-      '.tm-card-meta { padding-left: 2px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }',
+      '.tm-card-meta { padding-left: 2px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;',
+      '  font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }',
+      '.tm-meta-text { min-width: 0; }',
+      '.tm-tag { display: inline-flex; align-items: center; height: 14px; padding: 0 4px; border-radius: 4px;',
+      '  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);',
+      '  font-size: 9.5px; line-height: 1; white-space: nowrap; }',
       '.tm-card-meta--running { color: var(--dsw-alias-brand-primary); }',
       '.tm-remove { width: 20px; height: 20px; flex: 0 0 auto; opacity: 0; transition: opacity 120ms ease; }',
       '.tm-card:hover .tm-remove, .tm-card:focus-within .tm-remove { opacity: 1; }',
@@ -971,6 +1151,10 @@ window.__ModuleLoader__.load({
       '.tm-link { border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit;',
       '  font-size: 11px; padding: 4px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }',
       '.tm-link:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }',
+      '.tm-sync { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;',
+      '  flex: 0 0 auto; }',
+      '.tm-sync-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--dsw-alias-state-success-primary); }',
+      '.tm-sync--off .tm-sync-dot { background: var(--dsw-alias-label-secondary); opacity: 0.6; }',
       '.tm-resize { position: absolute; z-index: 3; }',
       '.tm-resize--r { top: 8px; right: 0; bottom: 12px; width: 6px; cursor: ew-resize; }',
       '.tm-resize--b { left: 8px; right: 14px; bottom: 0; height: 6px; cursor: ns-resize; }',

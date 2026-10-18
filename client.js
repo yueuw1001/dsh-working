@@ -65,6 +65,7 @@ window.__ModuleLoader__.load({
       syncOn: 'Auto-sync on',
       syncOff: 'Auto-sync unavailable',
       syncHint: 'Running sidebar sessions appear in Running; when a session stops, its card moves to Finished',
+      dockDescription: 'Running / finished task board in the side panel',
     }
 
     const zh = {
@@ -95,6 +96,7 @@ window.__ModuleLoader__.load({
       syncOn: '自动同步',
       syncOff: '自动同步不可用',
       syncHint: '侧边栏中正在运行的会话会自动出现在「运行中」，会话停止后自动移到「已结束」',
+      dockDescription: '侧边栏里的运行中 / 已结束任务看板',
     }
 
     const DICTS = { en: en, zh: zh }
@@ -385,6 +387,7 @@ window.__ModuleLoader__.load({
 
     function TaskMonitorPanel(props) {
       const locale = props !== null && props !== undefined && props.locale ? props.locale : moduleLocale
+      const docked = props !== null && props !== undefined && props.mode === 'dock'
       const [active, setActive] = useState(function () { return activeLocaleOf(locale) })
 
       useEffect(function () {
@@ -921,6 +924,79 @@ window.__ModuleLoader__.load({
 
       const runningCount = tasks.filter(function (task) { return task.status === 'running' }).length
       const doneCount = tasks.filter(function (task) { return task.status === 'done' }).length
+      const subtitleText = runningCount > 0
+        ? tr('subtitle', { total: tasks.length, running: runningCount })
+        : tr('subtitleIdle', { total: tasks.length })
+
+      function renderFooter() {
+        return h('div', { key: 'footer', className: 'tm-footer' }, [
+          h('form', {
+            key: 'form',
+            className: 'tm-add',
+            onSubmit: function (event) { event.preventDefault(); submitDraft() },
+          }, [
+            h('input', {
+              key: 'input',
+              className: 'tm-input',
+              type: 'text',
+              value: draft,
+              maxLength: 200,
+              placeholder: tr('addPlaceholder'),
+              'aria-label': tr('addPlaceholder'),
+              onChange: function (event) { setDraft(event.target.value) },
+            }),
+            h('select', {
+              key: 'select',
+              className: 'tm-select',
+              value: targetLane,
+              'aria-label': tr('add'),
+              onChange: function (event) { setTargetLane(event.target.value) },
+            }, LANE_IDS.map(function (lane) {
+              return h('option', { key: lane, value: lane }, tr(LANE_META[lane].key))
+            })),
+            h('button', {
+              key: 'submit',
+              className: 'tm-primary',
+              type: 'submit',
+              disabled: draft.trim() === '',
+            }, tr('add')),
+          ]),
+          doneCount > 0
+            ? h('button', {
+                key: 'clear',
+                type: 'button',
+                className: 'tm-link',
+                onClick: clearDone,
+              }, tr('clearFinished'))
+            : null,
+          h('span', {
+            key: 'sync',
+            className: 'tm-sync' + (autoSync ? ' tm-sync--on' : ' tm-sync--off'),
+            title: autoSync ? tr('syncHint') : tr('syncOff'),
+            'aria-label': autoSync ? tr('syncOn') : tr('syncOff'),
+          }, h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true })),
+        ])
+      }
+
+      // The right-sidebar tab body: no window chrome, no geometry, no
+      // collapse/close — the native pane owns all of that. The lanes reflow to
+      // two columns (or one) so the same board works in a narrow sidebar.
+      if (docked) {
+        return h(React.Fragment, null,
+          h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
+          h('div', { key: 'dock', className: 'tm-root tm-dock', 'data-tm-dock': '' }, [
+            h('div', { key: 'head', className: 'tm-dock-head' }, [
+              h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
+              h('div', { key: 'titles', className: 'tm-titles' }, [
+                h('div', { key: 'title', className: 'tm-title' }, tr('title')),
+                h('div', { key: 'sub', className: 'tm-subtitle', title: tr('hint') }, subtitleText),
+              ]),
+            ]),
+            h('div', { key: 'body', className: 'tm-body tm-dock-body' }, LANE_IDS.map(renderLane)),
+            renderFooter(),
+          ]),
+        )
+      }
 
       if (hidden) {
         return h(React.Fragment, null,
@@ -949,10 +1025,7 @@ window.__ModuleLoader__.load({
         h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
         h('div', { key: 'titles', className: 'tm-titles' }, [
           h('div', { key: 'title', className: 'tm-title' }, tr('title')),
-          h('div', { key: 'sub', className: 'tm-subtitle', title: tr('hint') },
-            runningCount > 0
-              ? tr('subtitle', { total: tasks.length, running: runningCount })
-              : tr('subtitleIdle', { total: tasks.length })),
+          h('div', { key: 'sub', className: 'tm-subtitle', title: tr('hint') }, subtitleText),
         ]),
         h('div', { key: 'actions', className: 'tm-actions', 'data-tm-no-drag': '' }, [
           h('button', {
@@ -972,54 +1045,6 @@ window.__ModuleLoader__.load({
             onClick: function () { setHidden(true) },
           }, h(IconClose)),
         ]),
-      ])
-
-      const footer = h('div', { key: 'footer', className: 'tm-footer' }, [
-        h('form', {
-          key: 'form',
-          className: 'tm-add',
-          onSubmit: function (event) { event.preventDefault(); submitDraft() },
-        }, [
-          h('input', {
-            key: 'input',
-            className: 'tm-input',
-            type: 'text',
-            value: draft,
-            maxLength: 200,
-            placeholder: tr('addPlaceholder'),
-            'aria-label': tr('addPlaceholder'),
-            onChange: function (event) { setDraft(event.target.value) },
-          }),
-          h('select', {
-            key: 'select',
-            className: 'tm-select',
-            value: targetLane,
-            'aria-label': tr('add'),
-            onChange: function (event) { setTargetLane(event.target.value) },
-          }, LANE_IDS.map(function (lane) {
-            return h('option', { key: lane, value: lane }, tr(LANE_META[lane].key))
-          })),
-          h('button', {
-            key: 'submit',
-            className: 'tm-primary',
-            type: 'submit',
-            disabled: draft.trim() === '',
-          }, tr('add')),
-        ]),
-        doneCount > 0
-          ? h('button', {
-              key: 'clear',
-              type: 'button',
-              className: 'tm-link',
-              onClick: clearDone,
-            }, tr('clearFinished'))
-          : null,
-        h('span', {
-          key: 'sync',
-          className: 'tm-sync' + (autoSync ? ' tm-sync--on' : ' tm-sync--off'),
-          title: autoSync ? tr('syncHint') : tr('syncOff'),
-          'aria-label': autoSync ? tr('syncOn') : tr('syncOff'),
-        }, h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true })),
       ])
 
       const handles = collapsed ? null : [
@@ -1054,7 +1079,7 @@ window.__ModuleLoader__.load({
           'data-tm-panel': '',
         }, collapsed
           ? [header]
-          : [header, h('div', { key: 'body', className: 'tm-body' }, LANE_IDS.map(renderLane)), footer, handles]),
+          : [header, h('div', { key: 'body', className: 'tm-body' }, LANE_IDS.map(renderLane)), renderFooter(), handles]),
         ghost,
       )
     }
@@ -1179,6 +1204,16 @@ window.__ModuleLoader__.load({
       '  background: var(--dsw-alias-bg-layer-2); font-variant-numeric: tabular-nums; }',
       '@media (max-width: 760px) { .tm-body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); } }',
       '@media (prefers-reduced-motion: reduce) { .tm-pulse::after { animation: none; opacity: 0; } }',
+      // Native right-sidebar tab body: the pane owns the chrome, so the board
+      // drops the window frame and reflows its lanes to the pane width.
+      '.tm-dock { position: relative; width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column;',
+      '  background: transparent; pointer-events: auto; font-size: 12.5px; line-height: 1.42; }',
+      '.tm-dock-head { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; min-width: 0;',
+      '  padding: 9px 10px 8px; border-bottom: 1px solid var(--dsw-alias-border-l1); }',
+      '.tm-dock-body { flex: 1 1 auto; min-height: 0; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));',
+      '  grid-auto-rows: minmax(0, 1fr); gap: 8px; padding: 8px 10px; overflow: hidden; }',
+      '.tm-dock-body .tm-lane { background: var(--dsw-alias-bg-base); }',
+      '.tm-dock .tm-footer { background: transparent; flex-wrap: wrap; row-gap: 6px; }',
     ].join('\n')
 
     // ------------------------------------------------------------------
@@ -1192,6 +1227,141 @@ window.__ModuleLoader__.load({
         return value === null ? undefined : value
       } catch (error) {
         return undefined
+      }
+    }
+
+    /** The native tab's title, localized at call time. */
+    function dockTitle() {
+      return translate(dictFor(activeLocaleOf(moduleLocale)), 'title')
+    }
+
+    /** The native guide row's description, localized at call time. */
+    function dockDescription() {
+      return translate(dictFor(activeLocaleOf(moduleLocale)), 'dockDescription')
+    }
+
+    /** The guide row's glyph: a small board with three status columns. */
+    function IconBoard(iconProps) {
+      const size = iconProps !== null && iconProps !== undefined && typeof iconProps.size === 'number' ? iconProps.size : 16
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: size,
+        height: size,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.3,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, [
+        h('rect', { key: 'frame', x: 1.8, y: 2.2, width: 12.4, height: 11.6, rx: 2.2 }),
+        h('path', { key: 'cols', d: 'M5.6 5.2v5.6M8 5.2v3.4M10.4 5.2v2.2' }),
+      ])
+    }
+
+    const AUTO_OPEN_KEY = 'dsh.task-monitor.dock-open.v2'
+
+    /** Open the tab in the right sidebar once per browser. */
+    function autoOpenDockTab(ctx) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return
+        if (window.localStorage.getItem(AUTO_OPEN_KEY) === '1') return
+      } catch (error) {
+        return
+      }
+      let tries = 0
+      const isOpen = function (right) {
+        try {
+          const source = right !== null && right !== undefined ? right.openTabs : undefined
+          const rows = source !== undefined && source !== null && typeof source.getSnapshot === 'function'
+            ? source.getSnapshot()
+            : undefined
+          if (!Array.isArray(rows)) return false
+          return rows.some(function (row) {
+            return row !== null && row !== undefined && row.kind === 'task-monitor'
+          })
+        } catch (error) {
+          return false
+        }
+      }
+      const attempt = function () {
+        tries += 1
+        let opened = false
+        try {
+          const right = ctx.get('sidebarRight')
+          if (right !== null && right !== undefined && typeof right.openTab === 'function') {
+            if (!isOpen(right)) right.openTab('task-monitor')
+            opened = isOpen(right)
+          }
+        } catch (error) {
+          opened = false
+        }
+        if (opened) {
+          try { window.localStorage.setItem(AUTO_OPEN_KEY, '1') } catch (error) { /* ignore */ }
+          return
+        }
+        if (tries < 3) window.setTimeout(attempt, 900)
+      }
+      window.setTimeout(attempt, 900)
+    }
+
+    /**
+     * Register the native right-sidebar tab: its type + guide capsule in the
+     * host's `sidebarRightTabs` registry, and the body in the keyed
+     * `sidebar.right.pane.tab` seat. Null when the host refuses the type (for
+     * example a stale id after a reload), so the caller can fall back.
+     */
+    function registerDockTab(ctx, tabs) {
+      const disposers = []
+      const disposeAll = function () {
+        for (let index = disposers.length - 1; index >= 0; index -= 1) {
+          try { disposers[index]() } catch (error) { /* release best effort */ }
+        }
+        disposers.length = 0
+      }
+      try {
+        disposers.push(tabs.register({
+          id: 'task-monitor',
+          kind: 'task-monitor',
+          keepMounted: true,
+          title: function () { return dockTitle() },
+          guide: [{
+            id: 'task-monitor',
+            order: 30,
+            title: function () { return dockTitle() },
+            description: function () { return dockDescription() },
+            icon: IconBoard,
+          }],
+        }))
+        disposers.push(ctx.slots.inject('sidebar.right.pane.tab', function () {
+          return ctx.slots.register({
+            name: 'sidebar.right.pane.tab',
+            key: 'task-monitor',
+            inject: function () { return { locale: moduleLocale, mode: 'dock' } },
+          }, TaskMonitorPanel)
+        }))
+      } catch (error) {
+        disposeAll()
+        return null
+      }
+      return disposeAll
+    }
+
+    /** Fallback floating window when the native right sidebar is unavailable. */
+    function registerOverlay(ctx) {
+      try {
+        return ctx.slots.inject('shell.overlay', function () {
+          return ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'task-monitor',
+            order: 40,
+            label: dockTitle,
+            inject: function () { return { locale: moduleLocale } },
+          }, TaskMonitorPanel)
+        })
+      } catch (error) {
+        return function () {}
       }
     }
 
@@ -1218,19 +1388,52 @@ window.__ModuleLoader__.load({
           return dispose
         }, 'task-monitor: dictionaries')
 
-        ctx.slots.inject('shell.overlay', function () {
-          return ctx.slots.register({
-            name: 'shell.overlay',
-            id: 'task-monitor',
-            order: 40,
-            label: function () {
-              return translate(dictFor(activeLocaleOf(moduleLocale)), 'title')
-            },
-            inject: function () {
-              return { locale: moduleLocale }
-            },
-          }, TaskMonitorPanel)
-        })
+        // Prefer the native right-sidebar tab; fall back to the floating
+        // window only when the host never provides its tab registry (for
+        // example a deployment without the right sidebar pane).
+        ctx.effect(function () {
+          let stopped = false
+          let timer = 0
+          let attempts = 0
+          let disposeDock = null
+          let disposeOverlay = null
+          const install = function () {
+            if (stopped) return
+            let tabs
+            try { tabs = ctx.get('sidebarRightTabs') } catch (error) { tabs = undefined }
+            if (tabs !== null && tabs !== undefined && typeof tabs.register === 'function') {
+              const dispose = registerDockTab(ctx, tabs)
+              if (dispose !== null) {
+                disposeDock = dispose
+                if (disposeOverlay !== null) {
+                  const off = disposeOverlay
+                  disposeOverlay = null
+                  try { off() } catch (error) { /* ignore */ }
+                }
+                autoOpenDockTab(ctx)
+                return
+              }
+            }
+            attempts += 1
+            if (attempts === 6 && disposeOverlay === null) disposeOverlay = registerOverlay(ctx)
+            if (attempts < 20) timer = window.setTimeout(install, 500)
+          }
+          install()
+          return function () {
+            stopped = true
+            try { window.clearTimeout(timer) } catch (error) { /* ignore */ }
+            if (disposeDock !== null) {
+              const off = disposeDock
+              disposeDock = null
+              try { off() } catch (error) { /* ignore */ }
+            }
+            if (disposeOverlay !== null) {
+              const off = disposeOverlay
+              disposeOverlay = null
+              try { off() } catch (error) { /* ignore */ }
+            }
+          }
+        }, 'task-monitor: native sidebar tab')
       },
     }
   },

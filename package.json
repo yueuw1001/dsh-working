@@ -1,6 +1,6 @@
 {
   "name": "@local/task-monitor",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "description": "Left-sidebar task monitor panel for the DSH Web UI.",
@@ -17,7 +17,8 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {

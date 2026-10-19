@@ -59,6 +59,11 @@ window.__ModuleLoader__.load({
       tokensBreakdown: 'Total {total} tokens · input {input} · output {output} · cache read {read} · cache write {write}',
       soundOn: 'Completion sound: on',
       soundOff: 'Completion sound: off',
+      balanceLabel: 'Balance',
+      todayLabel: 'Today',
+      balanceTitle: 'Remaining account balance',
+      todayTokensTitle: "Today's token usage across all sessions",
+      todayCostTitle: "Today's estimated spend (model prices)",
       runningMeta: 'Running {time}',
       createdMeta: 'Created {time}',
       finishedMeta: 'Finished {time}',
@@ -95,6 +100,11 @@ window.__ModuleLoader__.load({
       tokensBreakdown: '累计 {total} tokens · 输入 {input} · 输出 {output} · 缓存读 {read} · 缓存写 {write}',
       soundOn: '完成声音提示：开',
       soundOff: '完成声音提示：关',
+      balanceLabel: '余额',
+      todayLabel: '今日',
+      balanceTitle: '账户剩余金额',
+      todayTokensTitle: '今日全部会话的 token 用量',
+      todayCostTitle: '今日花费（按模型单价估算）',
       runningMeta: '运行中 {time}',
       createdMeta: '创建于 {time}',
       finishedMeta: '完成于 {time}',
@@ -162,6 +172,30 @@ window.__ModuleLoader__.load({
       if (a === null || a === undefined || b === null || b === undefined) return false
       return a.total === b.total && a.input === b.input && a.output === b.output
         && a.cacheRead === b.cacheRead && a.cacheWrite === b.cacheWrite
+    }
+
+    /** Currency text for the header stats (CNY/USD, two decimals). */
+    function formatMoney(amount, currency) {
+      const symbol = String(currency || 'CNY').toUpperCase() === 'USD' ? '$' : '¥'
+      if (!Number.isFinite(amount)) return symbol + '—'
+      try {
+        return symbol + amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      } catch (error) {
+        return symbol + amount.toFixed(2)
+      }
+    }
+
+    /** Today's spend across currencies, e.g. "¥0.56" or "¥0.56 + $0.02". */
+    function formatTodayMoney(today) {
+      const byCurrency = today !== null && today !== undefined && today.byCurrency ? today.byCurrency : {}
+      const keys = Object.keys(byCurrency).filter(function (key) { return Number.isFinite(byCurrency[key]) })
+      if (keys.length === 0) return '—'
+      keys.sort(function (a, b) {
+        if (a === 'CNY') return -1
+        if (b === 'CNY') return 1
+        return a < b ? -1 : a > b ? 1 : 0
+      })
+      return keys.map(function (key) { return formatMoney(byCurrency[key], key) }).join(' + ')
     }
 
     function uid() {
@@ -304,6 +338,8 @@ window.__ModuleLoader__.load({
       ignored: initialBoard !== null && initialBoard.ignored !== null ? initialBoard.ignored : [],
       syncAvailable: false,
       soundEnabled: initialBoard !== null && initialBoard.soundEnabled === false ? false : true,
+      balance: null,
+      today: null,
     }
     const boardListeners = new Set()
 
@@ -326,7 +362,8 @@ window.__ModuleLoader__.load({
     function updateBoard(patch) {
       const next = { ...boardState, ...patch }
       if (next.tasks === boardState.tasks && next.ignored === boardState.ignored
-        && next.syncAvailable === boardState.syncAvailable && next.soundEnabled === boardState.soundEnabled) return
+        && next.syncAvailable === boardState.syncAvailable && next.soundEnabled === boardState.soundEnabled
+        && next.balance === boardState.balance && next.today === boardState.today) return
       boardState = next
       publishBoard()
     }
@@ -348,6 +385,22 @@ window.__ModuleLoader__.load({
     function setSoundEnabled(next) {
       const enabled = next === true
       if (boardState.soundEnabled !== enabled) updateBoard({ soundEnabled: enabled })
+    }
+
+    function setBoardBalance(next) {
+      const current = boardState.balance
+      if (current !== null && current !== undefined && next !== null && next !== undefined
+        && current.amount === next.amount && current.currency === next.currency) return
+      updateBoard({ balance: next })
+    }
+
+    function setBoardToday(next) {
+      if (next === null || next === undefined) return
+      const current = boardState.today
+      const sameCurrency = current !== null && current !== undefined
+        && JSON.stringify(current.byCurrency || {}) === JSON.stringify(next.byCurrency || {})
+      if (current !== null && current !== undefined && current.tokens === next.tokens && current.day === next.day && sameCurrency) return
+      updateBoard({ today: next })
     }
 
     function useBoardState() {
@@ -422,6 +475,73 @@ window.__ModuleLoader__.load({
       } catch (error) {
         // An audio failure must never disturb the board.
       }
+    }
+
+    // ------------------------------------------------------------------
+    // Header stats: remaining balance and today's usage
+    // ------------------------------------------------------------------
+    //
+    // Balance is read from the installed dsh-api-dashboard route (the same
+    // number its own cards show); when that route has no DeepSeek wallet the
+    // core account remote is the fallback. Today's tokens and estimated spend
+    // come from that plugin's `queryBalanceCost` session projection.
+
+    async function fetchDashboardBalance() {
+      try {
+        if (typeof fetch !== 'function') return null
+        const response = await fetch('/api-dashboard/balances?stale=1', { credentials: 'same-origin' })
+        if (response === null || response === undefined || response.ok !== true) return null
+        const data = await response.json()
+        const list = data !== null && data !== undefined && Array.isArray(data.balances) ? data.balances : []
+        const item = list.find(function (row) {
+          return row !== null && row !== undefined && row.platform === 'deepseek'
+        })
+        if (!item || item.status !== 'ok') return null
+        const amount = Number(item.total)
+        if (!Number.isFinite(amount)) return null
+        return { amount: amount, currency: String(item.currency || 'CNY'), source: 'dashboard' }
+      } catch (error) {
+        return null
+      }
+    }
+
+    async function fetchAccountBalance() {
+      try {
+        if (moduleCtx === null || moduleCtx === undefined || typeof moduleCtx.get !== 'function') return null
+        const remote = moduleCtx.get('remote')
+        const account = remote !== null && remote !== undefined ? remote.account : undefined
+        if (account === null || account === undefined || typeof account.getBalance !== 'function') return null
+        const version = typeof window !== 'undefined' && window.__DSH_BOOT__ && typeof window.__DSH_BOOT__.version === 'string'
+          ? window.__DSH_BOOT__.version
+          : '0.0.0'
+        const result = await account.getBalance({
+          version: version,
+          locale: activeLocaleOf(moduleLocale),
+          timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+        })
+        if (result === null || result === undefined || result.ok !== true) return null
+        const details = result.value
+        if (details === null || details === undefined || details.status !== 'ready') return null
+        const wallets = []
+        if (Array.isArray(details.value)) wallets.push.apply(wallets, details.value)
+        if (Array.isArray(details.bonusWallets)) wallets.push.apply(wallets, details.bonusWallets)
+        if (wallets.length === 0) return null
+        const wallet = wallets.find(function (item) {
+          return item !== null && item !== undefined && item.currency === 'CNY' && Number.isFinite(Number(item.balance))
+        }) || wallets.find(function (item) {
+          return item !== null && item !== undefined && Number.isFinite(Number(item.balance))
+        })
+        if (wallet === undefined || wallet === null) return null
+        return { amount: Number(wallet.balance), currency: String(wallet.currency || 'CNY'), source: 'account' }
+      } catch (error) {
+        return null
+      }
+    }
+
+    async function loadBalance() {
+      const dashboard = await fetchDashboardBalance()
+      if (dashboard !== null) return dashboard
+      return fetchAccountBalance()
     }
 
     // ------------------------------------------------------------------
@@ -723,6 +843,53 @@ window.__ModuleLoader__.load({
         }).join('|')
       }, [sessionRows])
 
+      // Today's usage comes from the API dashboard's cost projection (same
+      // value for every session): tokens across all sessions + spend by
+      // currency. Absent when that plugin is not installed.
+      const todayStats = useMemo(function () {
+        if (!autoSync) return null
+        const projections = (sessionsState !== null && sessionsState !== undefined && sessionsState.projectionsBySession) || {}
+        const ids = Object.keys(projections)
+        for (let index = 0; index < ids.length; index += 1) {
+          const entry = projections[ids[index]]
+          const view = entry !== null && entry !== undefined && entry.values ? entry.values.queryBalanceCost : undefined
+          if (view === null || view === undefined || view.todayTokens === null || view.todayTokens === undefined) continue
+          const tokens = view.todayTokens
+          return {
+            tokens: (Number(tokens.uncachedInput) || 0) + (Number(tokens.cacheRead) || 0)
+              + (Number(tokens.cacheWrite) || 0) + (Number(tokens.output) || 0),
+            byCurrency: view.todayByCurrency !== null && typeof view.todayByCurrency === 'object' ? view.todayByCurrency : {},
+            day: typeof view.todayDay === 'string' ? view.todayDay : '',
+          }
+        }
+        return null
+      }, [autoSync, sessionsState])
+
+      useEffect(function () {
+        if (todayStats !== null) setBoardToday(todayStats)
+      }, [todayStats])
+
+      // Refresh the remaining balance periodically while the plugin is active.
+      useEffect(function () {
+        let stopped = false
+        let timer = 0
+        const tick = function () {
+          if (stopped) return
+          loadBalance().then(function (next) {
+            if (stopped) return
+            if (next !== null) setBoardBalance(next)
+            timer = window.setTimeout(tick, next === null ? 15000 : 60000)
+          }).catch(function () {
+            if (!stopped) timer = window.setTimeout(tick, 30000)
+          })
+        }
+        timer = window.setTimeout(tick, 1500)
+        return function () {
+          stopped = true
+          window.clearTimeout(timer)
+        }
+      }, [])
+
       const rowsRef = useRef(sessionRows)
       rowsRef.current = sessionRows
       const trackersRef = useRef(new Map())
@@ -861,6 +1028,8 @@ window.__ModuleLoader__.load({
       const tasks = board.tasks
       const syncAvailable = board.syncAvailable
       const soundEnabled = board.soundEnabled !== false
+      const balance = board.balance
+      const today = board.today
 
       const [editing, setEditing] = useState(null)
       const [draft, setDraft] = useState('')
@@ -1275,30 +1444,51 @@ window.__ModuleLoader__.load({
       return h(React.Fragment, null,
         h('style', { key: 'style', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { key: 'page', className: 'tm-root tm-page', 'data-tm-page': '', 'aria-label': tr('title') }, [
+          h('div', { key: 'top', className: 'tm-page-top' }, [
+            h('div', { key: 'stats', className: 'tm-stats', role: 'group', 'aria-label': tr('title') }, [
+              h('span', { key: 'balance', className: 'tm-stat', title: tr('balanceTitle') }, [
+                h('span', { key: 'label', className: 'tm-stat-label' }, tr('balanceLabel')),
+                h('span', { key: 'value', className: 'tm-stat-value' },
+                  balance !== null && balance !== undefined ? formatMoney(balance.amount, balance.currency) : '—'),
+              ]),
+              h('span', { key: 'todayTokens', className: 'tm-stat', title: tr('todayTokensTitle') }, [
+                h('span', { key: 'label', className: 'tm-stat-label' }, tr('todayLabel')),
+                h('span', { key: 'value', className: 'tm-stat-value' },
+                  today !== null && today !== undefined ? formatTokens(today.tokens) + ' ' + tr('tokensSuffix') : '—'),
+              ]),
+              h('span', { key: 'todayCost', className: 'tm-stat', title: tr('todayCostTitle') }, [
+                h('span', { key: 'label', className: 'tm-stat-label' }, tr('todayLabel')),
+                h('span', { key: 'value', className: 'tm-stat-value' },
+                  today !== null && today !== undefined ? formatTodayMoney(today) : '—'),
+              ]),
+            ]),
+            h('div', { key: 'actions', className: 'tm-top-actions' }, [
+              h('span', {
+                key: 'sync',
+                className: 'tm-sync' + (syncAvailable ? ' tm-sync--on' : ' tm-sync--off'),
+                title: syncAvailable ? tr('syncHint') : tr('syncOff'),
+                'aria-label': syncAvailable ? tr('syncOn') : tr('syncOff'),
+              }, [
+                h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true }),
+                h('span', { key: 'label', className: 'tm-sync-label' }, syncAvailable ? tr('syncOn') : tr('syncOff')),
+              ]),
+              h('button', {
+                key: 'sound',
+                type: 'button',
+                className: 'tm-icon tm-sound',
+                title: soundEnabled ? tr('soundOn') : tr('soundOff'),
+                'aria-label': soundEnabled ? tr('soundOn') : tr('soundOff'),
+                'aria-pressed': soundEnabled ? 'true' : 'false',
+                onClick: function () { setSoundEnabled(!soundEnabled) },
+              }, soundEnabled ? h(IconSoundOn) : h(IconSoundOff)),
+            ]),
+          ]),
           h('div', { key: 'head', className: 'tm-page-head' }, [
             h('span', { key: 'pulse', className: 'tm-pulse', 'aria-hidden': true }),
             h('div', { key: 'titles', className: 'tm-titles' }, [
               h('div', { key: 'title', className: 'tm-title' }, tr('title')),
               h('div', { key: 'sub', className: 'tm-subtitle' }, subtitleText),
             ]),
-            h('span', {
-              key: 'sync',
-              className: 'tm-sync' + (syncAvailable ? ' tm-sync--on' : ' tm-sync--off'),
-              title: syncAvailable ? tr('syncHint') : tr('syncOff'),
-              'aria-label': syncAvailable ? tr('syncOn') : tr('syncOff'),
-            }, [
-              h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true }),
-              h('span', { key: 'label', className: 'tm-sync-label' }, syncAvailable ? tr('syncOn') : tr('syncOff')),
-            ]),
-            h('button', {
-              key: 'sound',
-              type: 'button',
-              className: 'tm-icon tm-sound',
-              title: soundEnabled ? tr('soundOn') : tr('soundOff'),
-              'aria-label': soundEnabled ? tr('soundOn') : tr('soundOff'),
-              'aria-pressed': soundEnabled ? 'true' : 'false',
-              onClick: function () { setSoundEnabled(!soundEnabled) },
-            }, soundEnabled ? h(IconSoundOn) : h(IconSoundOff)),
           ]),
           h('div', { key: 'body', className: 'tm-page-body' }, LANE_IDS.map(renderLane)),
           h('div', { key: 'foot', className: 'tm-page-foot' }, [
@@ -1379,6 +1569,14 @@ window.__ModuleLoader__.load({
       '.tm-page { display: flex; flex-direction: column; gap: 10px; width: 100%; height: 100%; min-height: 0;',
       '  padding: 14px 16px 12px; font-size: 12.5px; line-height: 1.42; background: transparent; }',
       '.tm-page-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }',
+      '.tm-page-top { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }',
+      '.tm-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }',
+      '.tm-stat { display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 9px; border-radius: 999px;',
+      '  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); }',
+      '.tm-stat-label { font-size: 10px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-stat-value { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }',
+      '.tm-top-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }',
+      '.tm-top-actions .tm-sync { margin-left: 0; }',
       '.tm-pulse { position: relative; width: 8px; height: 8px; border-radius: 999px; flex: 0 0 auto;',
       '  background: var(--dsw-alias-brand-primary); }',
       '.tm-pulse::after { content: ""; position: absolute; inset: -4px; border-radius: 999px;',

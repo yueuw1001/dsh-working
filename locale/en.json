@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Task Monitor",
-    "description": "A left-sidebar task board: running sessions are collected automatically, each card shows cumulative token usage, and a chime plays when a run ends; a normal end moves to Finished, an error/interruption to Incomplete. You can also add projects; they start in Queued and are never moved by the sync."
+    "description": "A left-sidebar task board: the header shows the account balance, today's tokens and today's estimated spend. Running sessions are collected automatically with per-card token usage and a completion chime; a normal end moves to Finished, an error/interruption to Incomplete. You can also add projects."
   }
 }

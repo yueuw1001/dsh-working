@@ -1,9 +1,9 @@
 {
   "name": "@local/task-monitor",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
-  "description": "Floating task monitor board for the DSH Web UI.",
+  "description": "Left-sidebar task monitor panel for the DSH Web UI.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

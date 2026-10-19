@@ -57,6 +57,8 @@ window.__ModuleLoader__.load({
       tokensSuffix: 'tokens',
       tokensHint: 'Total {total} tokens',
       tokensBreakdown: 'Total {total} tokens · input {input} · output {output} · cache read {read} · cache write {write}',
+      soundOn: 'Completion sound: on',
+      soundOff: 'Completion sound: off',
       runningMeta: 'Running {time}',
       createdMeta: 'Created {time}',
       finishedMeta: 'Finished {time}',
@@ -91,6 +93,8 @@ window.__ModuleLoader__.load({
       tokensSuffix: 'tokens',
       tokensHint: '累计 {total} tokens',
       tokensBreakdown: '累计 {total} tokens · 输入 {input} · 输出 {output} · 缓存读 {read} · 缓存写 {write}',
+      soundOn: '完成声音提示：开',
+      soundOff: '完成声音提示：关',
       runningMeta: '运行中 {time}',
       createdMeta: '创建于 {time}',
       finishedMeta: '完成于 {time}',
@@ -271,7 +275,11 @@ window.__ModuleLoader__.load({
         const ignored = Array.isArray(data.ignored)
           ? data.ignored.filter(function (id) { return typeof id === 'string' }).slice(0, 200)
           : []
-        return { tasks: tasks, ignored: ignored }
+        return {
+          tasks: tasks,
+          ignored: ignored,
+          soundEnabled: data.soundEnabled !== false,
+        }
       } catch (error) {
         return null
       }
@@ -283,6 +291,7 @@ window.__ModuleLoader__.load({
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
           tasks: state.tasks,
           ignored: state.ignored,
+          soundEnabled: state.soundEnabled !== false,
         }))
       } catch (error) {
         // Storage may be unavailable or full; the board still works in memory.
@@ -294,6 +303,7 @@ window.__ModuleLoader__.load({
       tasks: initialBoard !== null && initialBoard.tasks !== null ? initialBoard.tasks : [],
       ignored: initialBoard !== null && initialBoard.ignored !== null ? initialBoard.ignored : [],
       syncAvailable: false,
+      soundEnabled: initialBoard !== null && initialBoard.soundEnabled === false ? false : true,
     }
     const boardListeners = new Set()
 
@@ -315,7 +325,8 @@ window.__ModuleLoader__.load({
 
     function updateBoard(patch) {
       const next = { ...boardState, ...patch }
-      if (next.tasks === boardState.tasks && next.ignored === boardState.ignored && next.syncAvailable === boardState.syncAvailable) return
+      if (next.tasks === boardState.tasks && next.ignored === boardState.ignored
+        && next.syncAvailable === boardState.syncAvailable && next.soundEnabled === boardState.soundEnabled) return
       boardState = next
       publishBoard()
     }
@@ -334,6 +345,11 @@ window.__ModuleLoader__.load({
       if (boardState.syncAvailable !== next) updateBoard({ syncAvailable: next })
     }
 
+    function setSoundEnabled(next) {
+      const enabled = next === true
+      if (boardState.soundEnabled !== enabled) updateBoard({ soundEnabled: enabled })
+    }
+
     function useBoardState() {
       const [state, setState] = useState(boardSnapshot)
       useEffect(function () {
@@ -341,6 +357,71 @@ window.__ModuleLoader__.load({
         return subscribeBoard(function () { setState(boardSnapshot()) })
       }, [])
       return state
+    }
+
+    // ------------------------------------------------------------------
+    // Completion chime
+    // ------------------------------------------------------------------
+    //
+    // A short synthesized two-note chime keeps the bundle asset-free. Browsers
+    // require a user gesture before audio may start, so the context is created
+    // and resumed on the first pointer/key gesture (see `apply`), and every
+    // sound is best effort: a blocked context never disturbs the board.
+
+    let audioContext = null
+    let lastChimeAt = 0
+
+    function ensureAudioContext() {
+      try {
+        if (typeof window === 'undefined') return null
+        if (audioContext === null) {
+          const Ctor = window.AudioContext || window.webkitAudioContext
+          if (typeof Ctor !== 'function') return null
+          audioContext = new Ctor()
+        }
+        if (audioContext.state === 'suspended' && typeof audioContext.resume === 'function') {
+          audioContext.resume().catch(function () { /* the next gesture retries */ })
+        }
+        return audioContext
+      } catch (error) {
+        return null
+      }
+    }
+
+    function chimeNote(context, frequency, at, duration, type, peak) {
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      oscillator.type = type
+      oscillator.frequency.setValueAtTime(frequency, at)
+      gain.gain.setValueAtTime(0.0001, at)
+      gain.gain.exponentialRampToValueAtTime(peak, at + 0.015)
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + duration)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start(at)
+      oscillator.stop(at + duration + 0.03)
+    }
+
+    /** Rising chime for Finished, falling chime for Incomplete. */
+    function playCompletionSound(lane) {
+      if (boardState.soundEnabled !== true) return
+      const nowMs = Date.now()
+      if (nowMs - lastChimeAt < 600) return
+      const context = ensureAudioContext()
+      if (context === null) return
+      lastChimeAt = nowMs
+      const start = context.currentTime + 0.03
+      try {
+        if (lane === 'done') {
+          chimeNote(context, 880.0, start, 0.16, 'sine', 0.12)
+          chimeNote(context, 1174.66, start + 0.14, 0.2, 'sine', 0.1)
+        } else {
+          chimeNote(context, 523.25, start, 0.18, 'triangle', 0.1)
+          chimeNote(context, 392.0, start + 0.16, 0.26, 'triangle', 0.085)
+        }
+      } catch (error) {
+        // An audio failure must never disturb the board.
+      }
     }
 
     // ------------------------------------------------------------------
@@ -552,6 +633,43 @@ window.__ModuleLoader__.load({
       return IconBoard(iconProps)
     }
 
+    function IconSoundOn() {
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: 14,
+        height: 14,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, [
+        h('path', { key: 'body', d: 'M3 6.2h2.2L8.4 3.6v8.8L5.2 9.8H3z' }),
+        h('path', { key: 'wave1', d: 'M10.4 5.7a3.1 3.1 0 0 1 0 4.6' }),
+        h('path', { key: 'wave2', d: 'M12.3 4a5.2 5.2 0 0 1 0 8' }),
+      ])
+    }
+
+    function IconSoundOff() {
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: 14,
+        height: 14,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, [
+        h('path', { key: 'body', d: 'M3 6.2h2.2L8.4 3.6v8.8L5.2 9.8H3z' }),
+        h('path', { key: 'slash', d: 'M10.3 6.2l3.4 3.6M13.7 6.2l-3.4 3.6' }),
+      ])
+    }
+
     function panelTitle() {
       return translate(dictFor(activeLocaleOf(moduleLocale)), 'title')
     }
@@ -636,11 +754,11 @@ window.__ModuleLoader__.load({
           boardSnapshot().tasks.filter(function (task) {
             return task.status === 'running' && task.source === 'session' && task.auto !== false
           }).forEach(function (task) {
-            if (running[task.sessionId] !== true) finishTracked(task.sessionId)
+            if (running[task.sessionId] !== true) finishTracked(task.sessionId, false)
           })
         } else {
           Object.keys(previous).forEach(function (id) {
-            if (running[id] !== true) finishTracked(id)
+            if (running[id] !== true) finishTracked(id, true)
           })
         }
         previousRunningRef.current = running
@@ -677,13 +795,15 @@ window.__ModuleLoader__.load({
         })
       }
 
-      function finishTracked(id) {
+      function finishTracked(id, notify) {
         const stillRunning = rowsRef.current.some(function (row) { return row.id === id && row.running })
         if (stillRunning) return
         let tracker = trackersRef.current.get(id)
         if (tracker === undefined) tracker = ensureTracker(id)
         if (tracker === null || tracker === undefined) {
+          const hadCard = hasRunningSessionCard(id)
           finishCard(id, 'done')
+          if (notify === true && hadCard) playCompletionSound('done')
           return
         }
         let settled = false
@@ -696,7 +816,10 @@ window.__ModuleLoader__.load({
           const error = tracker.error
           const failed = (reason !== undefined && reason !== 'completed')
             || (reason === undefined && typeof error === 'string' && error !== '')
-          finishCard(id, failed ? 'incomplete' : 'done')
+          const lane = failed ? 'incomplete' : 'done'
+          const hadCard = hasRunningSessionCard(id)
+          finishCard(id, lane)
+          if (notify === true && hadCard) playCompletionSound(lane)
           releaseSessionTracker(id, trackersRef.current)
         }
         // The sidebar's `running` flag and the durable `turn/end` event can
@@ -709,10 +832,19 @@ window.__ModuleLoader__.load({
           Promise.resolve(tracker.reference.ready).then(settleSoon).catch(function () {
             if (settled || tracker.disposed) return
             settled = true
+            const hadCard = hasRunningSessionCard(id)
             finishCard(id, 'done')
+            if (notify === true && hadCard) playCompletionSound('done')
             releaseSessionTracker(id, trackersRef.current)
           })
         }
+      }
+
+      /** Whether the board currently shows this session's running card. */
+      function hasRunningSessionCard(id) {
+        return boardSnapshot().tasks.some(function (task) {
+          return task.source === 'session' && task.sessionId === id && task.auto !== false && task.status === 'running'
+        })
       }
 
       return null
@@ -728,6 +860,7 @@ window.__ModuleLoader__.load({
       const board = useBoardState()
       const tasks = board.tasks
       const syncAvailable = board.syncAvailable
+      const soundEnabled = board.soundEnabled !== false
 
       const [editing, setEditing] = useState(null)
       const [draft, setDraft] = useState('')
@@ -1157,6 +1290,15 @@ window.__ModuleLoader__.load({
               h('span', { key: 'dot', className: 'tm-sync-dot', 'aria-hidden': true }),
               h('span', { key: 'label', className: 'tm-sync-label' }, syncAvailable ? tr('syncOn') : tr('syncOff')),
             ]),
+            h('button', {
+              key: 'sound',
+              type: 'button',
+              className: 'tm-icon tm-sound',
+              title: soundEnabled ? tr('soundOn') : tr('soundOff'),
+              'aria-label': soundEnabled ? tr('soundOn') : tr('soundOff'),
+              'aria-pressed': soundEnabled ? 'true' : 'false',
+              onClick: function () { setSoundEnabled(!soundEnabled) },
+            }, soundEnabled ? h(IconSoundOn) : h(IconSoundOff)),
           ]),
           h('div', { key: 'body', className: 'tm-page-body' }, LANE_IDS.map(renderLane)),
           h('div', { key: 'foot', className: 'tm-page-foot' }, [
@@ -1249,6 +1391,7 @@ window.__ModuleLoader__.load({
       '.tm-sync-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--dsw-alias-state-success-primary); }',
       '.tm-sync--off .tm-sync-dot { background: var(--dsw-alias-label-secondary); opacity: 0.6; }',
       '.tm-sync-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }',
+      '.tm-sound { width: 26px; height: 26px; }',
       '.tm-page-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }',
       '.tm-lane { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 6px; padding: 8px;',
       '  background: var(--dsw-alias-bg-layer-1); border: 1px solid transparent; border-radius: 10px;',
@@ -1399,6 +1542,20 @@ window.__ModuleLoader__.load({
           }
           return dispose
         }, 'task-monitor: dictionaries')
+
+        // Audio can only start after a user gesture; create/resume the context
+        // on the first pointer or key interaction so a later completion chime
+        // is not blocked by the browser's autoplay policy.
+        ctx.effect(function () {
+          if (typeof window === 'undefined') return function () {}
+          const unlock = function () { ensureAudioContext() }
+          window.addEventListener('pointerdown', unlock, true)
+          window.addEventListener('keydown', unlock, true)
+          return function () {
+            try { window.removeEventListener('pointerdown', unlock, true) } catch (error) { /* ignore */ }
+            try { window.removeEventListener('keydown', unlock, true) } catch (error) { /* ignore */ }
+          }
+        }, 'task-monitor: audio unlock')
 
         // Left sidebar entry: the sidebar owns the button and selects the
         // matching `main` panel by this id.

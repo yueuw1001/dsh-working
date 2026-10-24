@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
       incomplete: { key: 'laneIncomplete', tone: 'var(--dsw-alias-state-warn-primary)' },
     }
     const MAX_TASKS = 400
+    const PATH_MAX = 400
+    const RECENT_PATHS_MAX = 8
 
     const en = {
       title: 'Task Monitor',
@@ -72,6 +74,14 @@ window.__ModuleLoader__.load({
       movedTitle: 'Task Monitor moved to the left sidebar',
       movedBody: 'This tab is retired. Open the board from the Task Monitor icon in the left sidebar.',
       movedOpen: 'Open the board',
+      pathPlaceholder: 'Project folder, e.g. D:\\work\\my-app (optional)',
+      pathPickTitle: 'Choose a folder',
+      pathPickHint: 'Browsers return only the folder name; complete it to a full path',
+      pathNote: 'Picked “{name}” — browsers hide the absolute path, so complete it (e.g. C:\\work\\{name})',
+      pathAdd: 'Add path',
+      pathEditTitle: 'Set the project folder',
+      pathCopyTitle: 'Copy this path',
+      pathCopied: 'Copied',
     }
 
     const zh = {
@@ -113,6 +123,14 @@ window.__ModuleLoader__.load({
       movedTitle: '任务监控已移到左侧边栏',
       movedBody: '这个标签页已停用，请从左侧边栏的「任务监控」图标打开看板。',
       movedOpen: '打开看板',
+      pathPlaceholder: '项目路径，可选，如 D:\\work\\my-app',
+      pathPickTitle: '选择文件夹',
+      pathPickHint: '浏览器只返回文件夹名，请补全为完整路径',
+      pathNote: '已选择「{name}」——浏览器不提供绝对路径，请补全（如 C:\\work\\{name}）',
+      pathAdd: '添加路径',
+      pathEditTitle: '设置项目文件夹',
+      pathCopyTitle: '点击复制路径',
+      pathCopied: '已复制',
     }
 
     const DICTS = { en: en, zh: zh }
@@ -205,6 +223,84 @@ window.__ModuleLoader__.load({
         // Fall through.
       }
       return 'task-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
+    }
+
+    /**
+     * A project path is reader-typed text: trim spaces and wrapping quotes,
+     * unify the separators of a Windows / UNC path and drop trailing ones.
+     * Empty means "no path". It is display-and-copy only — the board never
+     * touches the disk, so any absolute path the reader pastes is kept as-is.
+     */
+    function normalizePath(raw) {
+      if (typeof raw !== 'string') return ''
+      let text = raw.trim()
+      if (text.length >= 2) {
+        const head = text.charAt(0)
+        const tail = text.charAt(text.length - 1)
+        if ((head === '"' && tail === '"') || (head === "'" && tail === "'")) text = text.slice(1, -1).trim()
+      }
+      if (text === '') return ''
+      const unc = /^\\\\/.test(text)
+      if (/^[a-zA-Z]:[\\/]/.test(text) || unc) {
+        let body = unc ? text.slice(2) : text
+        body = body.replace(/\//g, '\\').replace(/\\{2,}/g, '\\')
+        if (unc) return ('\\\\' + body.replace(/^\\+/, '').replace(/\\+$/, '')).slice(0, PATH_MAX)
+        const root = body.slice(0, 2).toUpperCase()
+        const rest = body.slice(2).replace(/^\\+/, '').replace(/\\+$/, '')
+        return (rest === '' ? root + '\\' : root + '\\' + rest).slice(0, PATH_MAX)
+      }
+      text = text.replace(/\/{2,}/g, '/')
+      if (text.length > 1) text = text.replace(/\/+$/, '')
+      if (text === '') text = '/'
+      return text.slice(0, PATH_MAX)
+    }
+
+    /** Case-insensitive on purpose: Windows folds drive letters and folder names. */
+    function samePath(left, right) {
+      const a = normalizePath(left)
+      const b = normalizePath(right)
+      return a !== '' && b !== '' && a.toLowerCase() === b.toLowerCase()
+    }
+
+    /** Keep the drive and the deepest folders, which is what identifies a card. */
+    function shortPath(path) {
+      const text = String(path || '')
+      if (text.length <= 44) return text
+      return text.slice(0, 9) + '…' + text.slice(text.length - 32)
+    }
+
+    function copyText(text) {
+      const value = String(text)
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard
+          && typeof navigator.clipboard.writeText === 'function') {
+          return navigator.clipboard.writeText(value).then(function () { return true }, function () {
+            return legacyCopy(value)
+          })
+        }
+      } catch (error) {
+        // Fall through to the legacy path.
+      }
+      return Promise.resolve(legacyCopy(value))
+    }
+
+    function legacyCopy(text) {
+      try {
+        if (typeof document === 'undefined' || !document.body) return false
+        const area = document.createElement('textarea')
+        area.value = text
+        area.setAttribute('readonly', '')
+        area.style.position = 'fixed'
+        area.style.top = '-1000px'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        const ok = typeof document.execCommand === 'function' && document.execCommand('copy') === true
+        document.body.removeChild(area)
+        return ok
+      } catch (error) {
+        return false
+      }
     }
 
     function dictFor(active) {
@@ -303,15 +399,27 @@ window.__ModuleLoader__.load({
                       cacheWrite: Number(task.tokenUsage.cacheWrite) || 0,
                     }
                   : undefined,
+                path: typeof task.path === 'string' ? normalizePath(task.path) || undefined : undefined,
               }
             })
           : []
         const ignored = Array.isArray(data.ignored)
           ? data.ignored.filter(function (id) { return typeof id === 'string' }).slice(0, 200)
           : []
+        const recentPaths = []
+        if (Array.isArray(data.recentPaths)) {
+          data.recentPaths.forEach(function (item) {
+            if (typeof item !== 'string') return
+            const path = normalizePath(item)
+            if (path === '' || recentPaths.length >= RECENT_PATHS_MAX) return
+            if (recentPaths.some(function (known) { return samePath(known, path) })) return
+            recentPaths.push(path)
+          })
+        }
         return {
           tasks: tasks,
           ignored: ignored,
+          recentPaths: recentPaths,
           soundEnabled: data.soundEnabled !== false,
         }
       } catch (error) {
@@ -325,6 +433,7 @@ window.__ModuleLoader__.load({
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
           tasks: state.tasks,
           ignored: state.ignored,
+          recentPaths: state.recentPaths,
           soundEnabled: state.soundEnabled !== false,
         }))
       } catch (error) {
@@ -336,6 +445,7 @@ window.__ModuleLoader__.load({
     let boardState = {
       tasks: initialBoard !== null && initialBoard.tasks !== null ? initialBoard.tasks : [],
       ignored: initialBoard !== null && initialBoard.ignored !== null ? initialBoard.ignored : [],
+      recentPaths: initialBoard !== null && initialBoard.recentPaths !== null ? initialBoard.recentPaths : [],
       syncAvailable: false,
       soundEnabled: initialBoard !== null && initialBoard.soundEnabled === false ? false : true,
       balance: null,
@@ -362,6 +472,7 @@ window.__ModuleLoader__.load({
     function updateBoard(patch) {
       const next = { ...boardState, ...patch }
       if (next.tasks === boardState.tasks && next.ignored === boardState.ignored
+        && next.recentPaths === boardState.recentPaths
         && next.syncAvailable === boardState.syncAvailable && next.soundEnabled === boardState.soundEnabled
         && next.balance === boardState.balance && next.today === boardState.today) return
       boardState = next
@@ -385,6 +496,18 @@ window.__ModuleLoader__.load({
     function setSoundEnabled(next) {
       const enabled = next === true
       if (boardState.soundEnabled !== enabled) updateBoard({ soundEnabled: enabled })
+    }
+
+    /** Most-recent first, case-insensitively de-duplicated; feeds the datalist. */
+    function rememberRecentPath(path) {
+      const value = normalizePath(path)
+      if (value === '') return
+      const known = boardState.recentPaths
+      if (known.length > 0 && samePath(known[0], value)) return
+      const next = [value].concat(known.filter(function (item) {
+        return !samePath(item, value)
+      })).slice(0, RECENT_PATHS_MAX)
+      updateBoard({ recentPaths: next })
     }
 
     function setBoardBalance(next) {
@@ -748,6 +871,25 @@ window.__ModuleLoader__.load({
       }, h('path', { d: 'M4.5 4.5l7 7M11.5 4.5l-7 7' }))
     }
 
+    /** Folder glyph for the project-path field and the card path row. */
+    function IconFolder() {
+      return h('svg', {
+        viewBox: '0 0 16 16',
+        width: 14,
+        height: 14,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': true,
+        focusable: false,
+      }, [
+        h('path', { key: 'body', d: 'M2 4.4c0-.8.6-1.4 1.4-1.4h2.5l1.3 1.5h5.4c.8 0 1.4.6 1.4 1.4v5.7c0 .8-.6 1.4-1.4 1.4H3.4c-.8 0-1.4-.6-1.4-1.4z' }),
+        h('path', { key: 'lip', d: 'M2.2 6.4h11.5' }),
+      ])
+    }
+
     /** The left sidebar's panel glyph. */
     function PanelIcon(iconProps) {
       return IconBoard(iconProps)
@@ -1030,9 +1172,13 @@ window.__ModuleLoader__.load({
       const soundEnabled = board.soundEnabled !== false
       const balance = board.balance
       const today = board.today
+      const recentPaths = board.recentPaths
 
       const [editing, setEditing] = useState(null)
       const [draft, setDraft] = useState('')
+      const [draftPath, setDraftPath] = useState('')
+      const [pathNote, setPathNote] = useState('')
+      const [copiedId, setCopiedId] = useState(null)
       const [drag, setDrag] = useState(null)
       const [drop, setDrop] = useState(null)
       const [now, setNow] = useState(function () { return Date.now() })
@@ -1045,6 +1191,8 @@ window.__ModuleLoader__.load({
       dragRef.current = drag
       const cancelledRef = useRef(false)
       const laneRefs = useRef({})
+      const pathInputRef = useRef(null)
+      const folderInputRef = useRef(null)
 
       // Live clock for running cards only.
       useEffect(function () {
@@ -1053,6 +1201,19 @@ window.__ModuleLoader__.load({
         const handle = window.setInterval(function () { setNow(Date.now()) }, 1000)
         return function () { window.clearInterval(handle) }
       }, [tasks])
+
+      // The pick note and the "copied" confirmation are transient.
+      useEffect(function () {
+        if (pathNote === '') return undefined
+        const handle = window.setTimeout(function () { setPathNote('') }, 7000)
+        return function () { window.clearTimeout(handle) }
+      }, [pathNote])
+
+      useEffect(function () {
+        if (copiedId === null) return undefined
+        const handle = window.setTimeout(function () { setCopiedId(null) }, 1200)
+        return function () { window.clearTimeout(handle) }
+      }, [copiedId])
 
       // Escape cancels a card drag or an inline rename.
       useEffect(function () {
@@ -1199,12 +1360,95 @@ window.__ModuleLoader__.load({
       function addProject() {
         const title = draft.trim().slice(0, 200)
         if (title === '') return
+        const path = normalizePath(draftPath)
         const task = { id: uid(), title: title, status: 'queued', createdAt: Date.now() }
+        if (path !== '') task.path = path
         setBoardTasks(function (previous) {
           const next = previous.concat([task])
           return next.length > MAX_TASKS ? next.slice(next.length - MAX_TASKS) : next
         })
         setDraft('')
+        setDraftPath('')
+        setPathNote('')
+        if (path !== '') rememberRecentPath(path)
+      }
+
+      /** A folder picker that never lies: `/`-aware, and it says when the
+       *  browser can only hand back a folder name (no absolute path). */
+      function pickFolder() {
+        const picker = typeof window !== 'undefined' ? window.showDirectoryPicker : undefined
+        if (typeof picker === 'function') {
+          let pending = null
+          try {
+            pending = picker.call(window, { mode: 'read' })
+          } catch (error) {
+            pending = null
+          }
+          if (pending !== null && pending !== undefined && typeof pending.then === 'function') {
+            pending.then(function (handle) {
+              if (handle !== null && handle !== undefined && typeof handle.name === 'string') applyPickedFolder(handle.name)
+            }, function (error) {
+              if (error !== null && error !== undefined && error.name === 'AbortError') return
+              openFolderInput()
+            })
+            return
+          }
+        }
+        openFolderInput()
+      }
+
+      /** Fallback for browsers without the directory picker: a directory input. */
+      function openFolderInput() {
+        const node = folderInputRef.current
+        if (node === null || node === undefined) {
+          if (pathInputRef.current !== null && pathInputRef.current !== undefined) pathInputRef.current.focus()
+          return
+        }
+        node.click()
+      }
+
+      function onFolderInputChange(event) {
+        const files = event.target.files
+        let name = ''
+        if (files !== null && files !== undefined && files.length > 0) {
+          const relative = String(files[0].webkitRelativePath || '')
+          name = relative.split('/')[0] || String(files[0].name || '')
+        }
+        try { event.target.value = '' } catch (error) { /* ignore */ }
+        if (name !== '') applyPickedFolder(name)
+      }
+
+      /**
+       * Browsers deliberately hide absolute paths, so a picked folder yields
+       * its name only: it is appended to whatever prefix the reader typed and
+       * the note asks them to complete the rest. A typed path is never
+       * overwritten — the picker only fills or extends it.
+       */
+      function applyPickedFolder(name) {
+        const value = String(name || '').trim()
+        if (value === '') return
+        setDraftPath(function (current) {
+          const text = String(current || '').trim()
+          if (text === '') return value
+          const last = text.charAt(text.length - 1)
+          if (last === '/' || last === '\\') return text + value
+          const tail = text.split(/[\\/]/).pop()
+          return tail === value ? text : text + '/' + value
+        })
+        setPathNote(tr('pathNote', { name: value }))
+        if (pathInputRef.current !== null && pathInputRef.current !== undefined) pathInputRef.current.focus()
+      }
+
+      function copyTaskPath(task) {
+        const text = String(task.path || '')
+        if (text === '') return
+        copyText(text).then(function (ok) {
+          if (ok === true) setCopiedId(task.id)
+        })
+      }
+
+      function openPathEditor(task) {
+        setEditing({ id: task.id, field: 'path', value: String(task.path || '') })
       }
 
       function removeTask(id) {
@@ -1263,6 +1507,21 @@ window.__ModuleLoader__.load({
         if (current === null || current.id !== id) return
         editingRef.current = null
         setEditing(null)
+        // Two inline editors share one state: the title and the project path.
+        if (current.field === 'path') {
+          const path = normalizePath(current.value)
+          setBoardTasks(function (previous) {
+            return previous.map(function (task) {
+              if (task.id !== id) return task
+              const next = { ...task }
+              if (path === '') delete next.path
+              else next.path = path
+              return next
+            })
+          })
+          if (path !== '') rememberRecentPath(path)
+          return
+        }
         const title = String(current.value || '').trim().slice(0, 200)
         if (title === '') return
         setBoardTasks(function (previous) {
@@ -1311,7 +1570,9 @@ window.__ModuleLoader__.load({
       function renderCard(task) {
         const dragging = drag !== null && drag.id === task.id
         const tone = LANE_META[task.status] !== undefined ? LANE_META[task.status].tone : 'var(--dsw-alias-label-secondary)'
-        const isEditing = editing !== null && editing.id === task.id
+        const isEditingTitle = editing !== null && editing.id === task.id && editing.field !== 'path'
+        const isEditingPath = editing !== null && editing.id === task.id && editing.field === 'path'
+        const hasPath = typeof task.path === 'string' && task.path !== ''
         return h('div', {
           key: task.id,
           className: 'tm-card' + (dragging ? ' tm-card--dragging' : ''),
@@ -1320,7 +1581,7 @@ window.__ModuleLoader__.load({
           onPointerDown: function (event) { onCardPointerDown(task, event) },
         }, [
           h('div', { key: 'top', className: 'tm-card-top' }, [
-            isEditing
+            isEditingTitle
               ? h('input', {
                   key: 'edit',
                   className: 'tm-edit',
@@ -1330,7 +1591,7 @@ window.__ModuleLoader__.load({
                   maxLength: 200,
                   'aria-label': tr('rename'),
                   onChange: function (event) {
-                    setEditing({ id: task.id, value: event.target.value })
+                    setEditing({ id: task.id, field: 'title', value: event.target.value })
                   },
                   onKeyDown: function (event) {
                     event.stopPropagation()
@@ -1350,7 +1611,7 @@ window.__ModuleLoader__.load({
                   key: 'title',
                   className: 'tm-card-title',
                   title: task.title,
-                  onDoubleClick: function () { setEditing({ id: task.id, value: task.title }) },
+                  onDoubleClick: function () { setEditing({ id: task.id, field: 'title', value: task.title }) },
                 }, task.title),
             h('button', {
               key: 'remove',
@@ -1364,6 +1625,68 @@ window.__ModuleLoader__.load({
               },
             }, h(IconClose)),
           ]),
+          hasPath || isEditingPath || !task.sessionId
+            ? h('div', { key: 'pathrow', className: 'tm-card-pathrow' }, [
+                isEditingPath
+                  ? h('input', {
+                      key: 'pathEdit',
+                      className: 'tm-edit tm-edit--path',
+                      type: 'text',
+                      value: editing.value,
+                      autoFocus: true,
+                      maxLength: PATH_MAX,
+                      placeholder: tr('pathPlaceholder'),
+                      'aria-label': tr('pathEditTitle'),
+                      onChange: function (event) {
+                        setEditing({ id: task.id, field: 'path', value: event.target.value })
+                      },
+                      onKeyDown: function (event) {
+                        event.stopPropagation()
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          commitEdit(task.id)
+                        } else if (event.key === 'Escape') {
+                          event.preventDefault()
+                          editingRef.current = null
+                          setEditing(null)
+                        }
+                      },
+                      onBlur: function () { commitEdit(task.id) },
+                      onPointerDown: function (event) { event.stopPropagation() },
+                    })
+                  : hasPath
+                    ? h('button', {
+                        key: 'path',
+                        type: 'button',
+                        className: 'tm-card-path' + (copiedId === task.id ? ' tm-card-path--copied' : ''),
+                        title: task.path + '\n' + tr('pathCopyTitle') + ' · ' + tr('pathEditTitle'),
+                        onClick: function (event) {
+                          event.stopPropagation()
+                          copyTaskPath(task)
+                        },
+                        onDoubleClick: function (event) {
+                          event.stopPropagation()
+                          openPathEditor(task)
+                        },
+                        onPointerDown: function (event) { event.stopPropagation() },
+                      }, [
+                        h('span', { key: 'icon', className: 'tm-card-path-icon', 'aria-hidden': true }, h(IconFolder)),
+                        h('span', { key: 'text', className: 'tm-card-path-text' },
+                          copiedId === task.id ? tr('pathCopied') : shortPath(task.path)),
+                      ])
+                    : h('button', {
+                        key: 'pathAdd',
+                        type: 'button',
+                        className: 'tm-path-add',
+                        title: tr('pathEditTitle'),
+                        onClick: function (event) {
+                          event.stopPropagation()
+                          openPathEditor(task)
+                        },
+                        onPointerDown: function (event) { event.stopPropagation() },
+                      }, '+ ' + tr('pathAdd')),
+              ])
+            : null,
           h('div', {
             key: 'meta',
             className: 'tm-card-meta' + (task.status === 'running' ? ' tm-card-meta--running' : ''),
@@ -1499,7 +1822,7 @@ window.__ModuleLoader__.load({
             }, [
               h('input', {
                 key: 'input',
-                className: 'tm-input',
+                className: 'tm-input tm-input--name',
                 type: 'text',
                 value: draft,
                 maxLength: 200,
@@ -1507,6 +1830,43 @@ window.__ModuleLoader__.load({
                 'aria-label': tr('addProjectPlaceholder'),
                 onChange: function (event) { setDraft(event.target.value) },
               }),
+              h('div', { key: 'path', className: 'tm-path-field' }, [
+                h('input', {
+                  key: 'pathInput',
+                  ref: pathInputRef,
+                  className: 'tm-input tm-input--path',
+                  type: 'text',
+                  value: draftPath,
+                  maxLength: PATH_MAX,
+                  list: 'tm-recent-paths',
+                  placeholder: tr('pathPlaceholder'),
+                  'aria-label': tr('pathPlaceholder'),
+                  title: tr('pathPickHint'),
+                  onChange: function (event) { setDraftPath(event.target.value) },
+                }),
+                h('button', {
+                  key: 'pick',
+                  type: 'button',
+                  className: 'tm-icon tm-pick',
+                  title: tr('pathPickTitle'),
+                  'aria-label': tr('pathPickTitle'),
+                  onClick: pickFolder,
+                }, h(IconFolder)),
+                h('input', {
+                  key: 'folderInput',
+                  ref: folderInputRef,
+                  className: 'tm-folder-input',
+                  type: 'file',
+                  multiple: true,
+                  tabIndex: -1,
+                  'aria-hidden': true,
+                  onChange: onFolderInputChange,
+                  webkitdirectory: '',
+                  directory: '',
+                }),
+                h('datalist', { key: 'recent', id: 'tm-recent-paths' },
+                  recentPaths.map(function (item) { return h('option', { key: item, value: item }) })),
+              ]),
               h('button', {
                 key: 'submit',
                 className: 'tm-primary',
@@ -1514,6 +1874,9 @@ window.__ModuleLoader__.load({
                 disabled: draft.trim() === '',
               }, tr('addProject')),
             ]),
+            pathNote !== ''
+              ? h('span', { key: 'note', className: 'tm-note', role: 'status' }, pathNote)
+              : null,
             h('span', { key: 'hint', className: 'tm-foot-hint', title: tr('syncHint') }, tr('pageHint')),
             doneCount > 0
               ? h('button', {
@@ -1618,6 +1981,18 @@ window.__ModuleLoader__.load({
       '.tm-card--dragging { opacity: 0.34; }',
       '.tm-card-top { display: flex; align-items: flex-start; gap: 4px; }',
       '.tm-card-title { flex: 1 1 auto; min-width: 0; font-size: 12px; padding-left: 2px; word-break: break-word; white-space: pre-wrap; }',
+      '.tm-card-pathrow { padding-left: 2px; min-width: 0; }',
+      '.tm-edit--path { width: 100%; font-size: 10.5px; padding: 1px 5px; }',
+      '.tm-card-path { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 0;',
+      '  border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit;',
+      '  font-size: 10.5px; cursor: pointer; text-align: left; }',
+      '.tm-card-path:hover { color: var(--dsw-alias-label-primary); }',
+      '.tm-card-path--copied { color: var(--dsw-alias-state-success-primary); }',
+      '.tm-card-path-icon { display: inline-flex; flex: 0 0 auto; opacity: 0.85; }',
+      '.tm-card-path-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      '.tm-path-add { padding: 0 2px; border: 0; background: transparent; color: var(--dsw-alias-label-secondary);',
+      '  font: inherit; font-size: 10px; cursor: pointer; opacity: 0.7; }',
+      '.tm-path-add:hover { opacity: 1; color: var(--dsw-alias-label-primary); }',
       '.tm-card-meta { padding-left: 2px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;',
       '  font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }',
       '.tm-meta-text { min-width: 0; }',
@@ -1645,6 +2020,15 @@ window.__ModuleLoader__.load({
       '.tm-input { flex: 1 1 auto; min-width: 0; height: 30px; padding: 0 9px; border-radius: 7px;',
       '  border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base);',
       '  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; outline: none; }',
+      '.tm-input--name { flex: 0 1 210px; min-width: 120px; }',
+      '.tm-path-field { position: relative; display: flex; align-items: center; gap: 4px;',
+      '  flex: 1 1 300px; min-width: 180px; }',
+      '.tm-input--path { flex: 1 1 auto; }',
+      '.tm-pick { width: 30px; height: 30px; flex: 0 0 auto; border: 1px solid var(--dsw-alias-border-l1);',
+      '  border-radius: 7px; background: var(--dsw-alias-bg-base); }',
+      '.tm-pick:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }',
+      '.tm-folder-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }',
+      '.tm-note { flex: 1 1 100%; font-size: 10.5px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }',
       '.tm-input::placeholder { color: var(--dsw-alias-label-secondary); opacity: 0.75; }',
       '.tm-input:focus { border-color: var(--dsw-alias-brand-primary); }',
       '.tm-foot-hint { margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }',
@@ -1664,6 +2048,7 @@ window.__ModuleLoader__.load({
       '  gap: 10px; padding: 24px; text-align: center; }',
       '.tm-migrate-title { font-size: 13px; font-weight: 600; }',
       '.tm-migrate-text { font-size: 12px; color: var(--dsw-alias-label-secondary); max-width: 260px; }',
+      '@media (max-width: 1100px) { .tm-add-project { flex-wrap: wrap; } .tm-input--name { flex: 1 1 140px; } }',
       '@media (max-width: 980px) { .tm-page-body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); } }',
       '@media (max-width: 900px) { .tm-foot-hint { display: none; } }',
       '@media (prefers-reduced-motion: reduce) { .tm-pulse::after { animation: none; opacity: 0; } }',
